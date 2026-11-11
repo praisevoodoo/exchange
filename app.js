@@ -1100,15 +1100,15 @@
   }
 
   /* ---------------- map ----------------
-     MapLibre globe with OpenFreeMap tiles and AWS terrain, loaded only when you open the page.
-     Everything outside Japan is faded out.
+     MapLibre with OpenFreeMap tiles, just Japan. Terrain loads only while tilted,
+     and the map library is fetched in the background once the app is idle.
      Place search uses OpenStreetMap's Nominatim, only when you press Search. */
   const PLACE_KINDS = ['Sights', 'Food', 'Nature', 'City', 'Stay', 'Shopping', 'Other'];
   const placeColor = p => catColor(PLACE_KINDS, p.kind);
-  let mapLibLoading = null, map = null, mapView = null, pickMode = false, focusId = null, japanShape = null;
+  let mapLibLoading = null, map = null, mapView = null, pickMode = false, focusId = null, japanLoading = null;
   const MAPLIBRE = 'https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl';
-  const HOME_CENTER = [137.8, 37.0], HOME_ZOOM = 3.7;
-  const JAPAN_BOUNDS = [[124, 25], [148, 45.5]]; // the map's center can't leave this box
+  const JAPAN_BOX = [[127.4, 25.9], [146.2, 45.6]];   // all of Japan, Okinawa to Hokkaido — the farthest you can zoom out
+  const JAPAN_LIMIT = [[116, 19], [158, 51]];         // how far you can drag
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -1128,25 +1128,38 @@
     return mapLibLoading;
   }
 
-  // Japan's outline (Natural Earth), used to fade every other country and trace the coast in rainbow
+  // Japan's outline (Natural Earth, saved with the app as japan.json): fades the rest of the map and traces the coast in rainbow
   const ringArea = r => { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j][0] - r[i][0]) * (r[j][1] + r[i][1]); return a; };
-  async function loadJapanShape() {
-    if (japanShape) return japanShape;
-    if (!window.topojson) await loadScript('https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js');
-    const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json').then(r => r.json());
-    const jp = topojson.feature(topo, topo.objects.countries).features.find(f => String(f.id) === '392');
-    if (!jp) throw new Error('Japan outline not found');
-    const polys = jp.geometry.type === 'Polygon' ? [jp.geometry.coordinates] : jp.geometry.coordinates;
-    const east = [[100, -89.9], [180, -89.9], [180, 89.9], [100, 89.9], [100, -89.9]];
-    const west = [[-180, -89.9], [100, -89.9], [100, 89.9], [-180, 89.9], [-180, -89.9]];
-    const sign = Math.sign(ringArea(east));
-    const holes = polys.map(p => Math.sign(ringArea(p[0])) === sign ? p[0].slice().reverse() : p[0]);
-    japanShape = {
-      land: { type: 'Feature', properties: {}, geometry: jp.geometry },
-      mask: { type: 'Feature', properties: {}, geometry: { type: 'MultiPolygon', coordinates: [[east, ...holes], [west]] } },
-      coast: { type: 'FeatureCollection', features: polys.map(p => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: p[0] } })) },
-    };
-    return japanShape;
+  function loadJapanShape() {
+    if (!japanLoading) japanLoading = fetch('japan.json').then(r => r.json()).then(land => {
+      const polys = land.geometry.coordinates;
+      const outer = [[90, -10], [190, -10], [190, 70], [90, 70], [90, -10]];
+      const sign = Math.sign(ringArea(outer));
+      const holes = polys.map(p => Math.sign(ringArea(p[0])) === sign ? p[0].slice().reverse() : p[0]);
+      return {
+        land,
+        mask: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [outer, ...holes] } },
+        coast: { type: 'FeatureCollection', features: polys.map(p => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: p[0] } })) },
+      };
+    }).catch(e => { japanLoading = null; throw e; });
+    return japanLoading;
+  }
+  // start fetching the map in the background once the app is idle, so the Map page opens quickly
+  function preloadMap() {
+    const go = () => { loadMapLib().catch(() => {}); loadJapanShape().catch(() => {}); };
+    if ('requestIdleCallback' in window) requestIdleCallback(go, { timeout: 4000 }); else setTimeout(go, 2500);
+  }
+
+  // 3D terrain only loads while the map is tilted
+  const DEM = { type: 'raster-dem', tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'], encoding: 'terrarium', tileSize: 256, maxzoom: 12, attribution: 'Terrain: <a href="https://registry.opendata.aws/terrain-tiles/">Mapzen / AWS Open Data</a>' };
+  function syncTerrain(m) {
+    const want = m.getPitch() > 8;
+    try {
+      if (want && !m.getTerrain()) {
+        if (!m.getSource('dem')) m.addSource('dem', DEM);
+        m.setTerrain({ source: 'dem', exaggeration: 1.3 });
+      } else if (!want && m.getTerrain()) m.setTerrain(null);
+    } catch (e) { console.warn(e); }
   }
 
   const shownPlaces = () => state.places.filter(p => !state.ui.placeFilter || p.status === state.ui.placeFilter);
@@ -1175,13 +1188,14 @@
       popup = new maplibregl.Popup({ maxWidth: '290px', offset: 14, className: 'place-pop' }).setLngLat([p.lng, p.lat]).setHTML(placePopup(p)).addTo(map);
       hydratePhotos(popup.getElement());
     };
-    if (fly) { map.flyTo({ center: [p.lng, p.lat], zoom: 10.5, pitch: 50, bearing: -15, duration: 2400, essential: true }); map.once('moveend', show); }
+    if (fly) { map.flyTo({ center: [p.lng, p.lat], zoom: 10.5, pitch: 45, bearing: -15, duration: 2000, essential: true }); map.once('moveend', show); }
     else show();
   }
 
   async function mountMap() {
     const el = $('#map');
     if (!el) return;
+    const shapeP = loadJapanShape().catch(e => { console.warn('Japan outline unavailable', e); return null; });
     try { await loadMapLib(); }
     catch { el.innerHTML = '<div class="map-off">The map needs an internet connection to load.</div>'; return; }
     if (!document.contains(el)) return;
@@ -1190,26 +1204,25 @@
     const m = new maplibregl.Map({
       container: el,
       style: 'https://tiles.openfreemap.org/styles/dark',
-      center: mapView ? mapView.c : HOME_CENTER, zoom: mapView ? mapView.z : HOME_ZOOM,
-      pitch: mapView ? mapView.p : 0, bearing: mapView ? mapView.b : 0,
-      minZoom: HOME_ZOOM, maxZoom: 17, maxPitch: 75,
-      transformCameraUpdate: cam => cam.center ? { center: new maplibregl.LngLat(clamp(cam.center.lng, JAPAN_BOUNDS[0][0], JAPAN_BOUNDS[1][0]), clamp(cam.center.lat, JAPAN_BOUNDS[0][1], JAPAN_BOUNDS[1][1])) } : {},
-      attributionControl: { compact: true },
+      ...(mapView ? { center: mapView.c, zoom: mapView.z, pitch: mapView.p, bearing: mapView.b } : { bounds: JAPAN_BOX, fitBoundsOptions: { padding: 12 } }),
+      maxBounds: JAPAN_LIMIT, maxZoom: 17, maxPitch: 70,
+      attributionControl: { compact: true }, fadeDuration: 0,
     });
     map = m;
+    // the farthest you can zoom out is the whole of Japan on this screen
+    const homeZoom = () => m.cameraForBounds(JAPAN_BOX, { padding: 12 })?.zoom ?? 4;
+    m.setMinZoom(Math.max(0, homeZoom() - 0.05));
     m.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
-    m.on('style.load', () => { try { m.setProjection({ type: 'globe' }); } catch (e) { console.warn(e); } });
+    m.on('pitchend', () => syncTerrain(m));
 
     m.on('load', async () => {
+      el.classList.add('ready');
       el.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
       const firstLabel = (m.getStyle().layers.find(l => l.type === 'symbol') || {}).id;
-      // real terrain: mountains rise when you tilt the map
-      const dem = { type: 'raster-dem', tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'], encoding: 'terrarium', tileSize: 256, maxzoom: 12, attribution: 'Terrain: <a href="https://registry.opendata.aws/terrain-tiles/">Mapzen / AWS Open Data</a>' };
-      m.addSource('dem', dem);
-      m.addSource('dem-shade', { ...dem });
-      m.addLayer({ id: 'relief', type: 'hillshade', source: 'dem-shade', paint: { 'hillshade-shadow-color': '#000000', 'hillshade-highlight-color': '#4a4a52', 'hillshade-accent-color': '#111114', 'hillshade-exaggeration': 0.55 } }, firstLabel);
-      try { m.setTerrain({ source: 'dem', exaggeration: 1.3 }); } catch (e) { console.warn(e); }
-      try { m.setSky({ 'sky-color': '#0b0b10', 'horizon-color': '#1d1d27', 'fog-color': '#0b0b10', 'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.5, 'fog-ground-blend': 0.3, 'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 0.35, 5, 0.2, 8, 0] }); } catch (e) { console.warn(e); }
+      // shaded relief once you zoom in a little
+      m.addSource('dem-shade', { ...DEM });
+      m.addLayer({ id: 'relief', type: 'hillshade', source: 'dem-shade', minzoom: 6, paint: { 'hillshade-shadow-color': '#000000', 'hillshade-highlight-color': '#4a4a52', 'hillshade-accent-color': '#111114', 'hillshade-exaggeration': 0.55 } }, firstLabel);
+      syncTerrain(m);
 
       m.addSource('places', { type: 'geojson', data: placesGeo() });
       m.addLayer({ id: 'places-glow', type: 'circle', source: 'places', paint: { 'circle-radius': 15, 'circle-color': ['get', 'color'], 'circle-opacity': ['case', ['==', ['get', 'want'], 1], 0.12, 0.28], 'circle-blur': 1, 'circle-pitch-alignment': 'viewport' } });
@@ -1218,9 +1231,9 @@
       m.on('mouseleave', 'places-dot', () => { m.getCanvas().style.cursor = ''; });
       m.on('click', 'places-dot', e => { if (pickMode) return; openPlace(find(state.places, e.features[0].properties.id)); });
 
-      try {
-        const jp = await loadJapanShape();
-        if (map !== m) return;
+      const jp = await shapeP;
+      if (map !== m) return;
+      if (jp) {
         m.addSource('not-japan', { type: 'geojson', data: jp.mask });
         m.addLayer({ id: 'not-japan', type: 'fill', source: 'not-japan', paint: { 'fill-color': '#060608', 'fill-opacity': 0.94, 'fill-antialias': false } }, 'places-glow');
         m.addSource('coast', { type: 'geojson', data: jp.coast, lineMetrics: true });
@@ -1230,7 +1243,7 @@
           const f = m.getFilter(l.id);
           try { m.setFilter(l.id, f ? ['all', f, ['within', jp.land]] : ['within', jp.land]); } catch (e) { console.warn(l.id, e); }
         });
-      } catch (e) { console.warn('Japan outline unavailable', e); }
+      }
 
       if (focusId) { const p = find(state.places, focusId); focusId = null; openPlace(p, true); }
       else if (!mapView && shownPlaces().length) {
@@ -1268,8 +1281,8 @@
         <button class="btn sm" data-action="map-tilt">3D tilt</button>
         <button class="btn sm ghost" data-action="map-home">All of Japan</button>
       </div>
-      <div id="map" class="map"></div>
-      <p class="dim" style="font-size:11.5px;margin:8px 0 0">Drag to spin · scroll or pinch to zoom · right-drag or two-finger drag to tilt and see the mountains.</p>
+      <div id="map" class="map"><div class="map-loading">Loading Japan…</div></div>
+      <p class="dim" style="font-size:11.5px;margin:8px 0 0">Drag to move · scroll or pinch to zoom · tap 3D tilt (or two-finger drag) to see the mountains.</p>
       <section class="section">
         ${list.length ? `<div class="rows">${list.map(p => `<div class="row" style="align-items:center">
             <span class="map-dot ${p.status === 'want' ? 'want' : ''}" style="--c:${placeColor(p)}"></span>
@@ -1599,7 +1612,7 @@
       else { focusId = el.dataset.id; mountMap(); }
     },
     'map-tilt': () => { if (map) map.easeTo({ pitch: map.getPitch() > 15 ? 0 : 60, bearing: map.getPitch() > 15 ? 0 : -20, duration: 1200 }); },
-    'map-home': () => { if (map) map.flyTo({ center: HOME_CENTER, zoom: HOME_ZOOM, pitch: 0, bearing: 0, duration: 1800 }); },
+    'map-home': () => { if (map) map.fitBounds(JAPAN_BOX, { padding: 12, pitch: 0, bearing: 0, duration: 1600 }); },
     'place-filter': el => { state.ui.placeFilter = el.dataset.val; mapView = null; save(); render(); },
     'photo-open': el => photoModal(find(state.photos, el.dataset.id)),
     'wish-filter': el => { state.ui.wishCat = el.dataset.val; save(); render(); },
@@ -1798,4 +1811,5 @@
   setInterval(() => { if (today() !== lastDay) { lastDay = today(); if (!modalStack.length) render(); } }, 60000);
 
   render();
+  preloadMap();
 })();

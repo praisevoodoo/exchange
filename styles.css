@@ -728,3 +728,7 @@ mark { background: rgba(230,200,120,.22); color: var(--text); border-radius: 2px
 .map .maplibregl-ctrl-attrib-button { filter: invert(1); }
 .map.picking .maplibregl-canvas { cursor: crosshair !important; }
 @media (max-width: 560px) { .map { height: 420px; } }
+.map { position: relative; }
+.map-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); pointer-events: none; animation: pulse 1.6s ease-in-out infinite; }
+.map.ready .map-loading { display: none; }
+@keyframes pulse { 50% { opacity: .35; } }
