@@ -1107,7 +1107,7 @@
   const placeColor = p => catColor(PLACE_KINDS, p.kind);
   let mapLibLoading = null, map = null, mapView = null, pickMode = false, focusId = null, japanShape = null;
   const MAPLIBRE = 'https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl';
-  const JAPAN_BOUNDS = [[118, 18], [160, 52]];
+  const JAPAN_BOUNDS = [[124, 25], [148, 45.5]]; // the map's center can't leave this box
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -1136,11 +1136,12 @@
     const jp = topojson.feature(topo, topo.objects.countries).features.find(f => String(f.id) === '392');
     if (!jp) throw new Error('Japan outline not found');
     const polys = jp.geometry.type === 'Polygon' ? [jp.geometry.coordinates] : jp.geometry.coordinates;
-    const outer = [[100, 0], [180, 0], [180, 66], [100, 66], [100, 0]];
-    const sign = Math.sign(ringArea(outer));
+    const east = [[100, -89.9], [180, -89.9], [180, 89.9], [100, 89.9], [100, -89.9]];
+    const west = [[-180, -89.9], [100, -89.9], [100, 89.9], [-180, 89.9], [-180, -89.9]];
+    const sign = Math.sign(ringArea(east));
     const holes = polys.map(p => Math.sign(ringArea(p[0])) === sign ? p[0].slice().reverse() : p[0]);
     japanShape = {
-      mask: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [outer, ...holes] } },
+      mask: { type: 'Feature', properties: {}, geometry: { type: 'MultiPolygon', coordinates: [[east, ...holes], [west]] } },
       coast: { type: 'FeatureCollection', features: polys.map(p => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: p[0] } })) },
     };
     return japanShape;
@@ -1189,7 +1190,8 @@
       style: 'https://tiles.openfreemap.org/styles/dark',
       center: mapView ? mapView.c : [137.8, 37.0], zoom: mapView ? mapView.z : 3.7,
       pitch: mapView ? mapView.p : 0, bearing: mapView ? mapView.b : 0,
-      minZoom: 3.2, maxZoom: 17, maxPitch: 75, maxBounds: JAPAN_BOUNDS,
+      minZoom: 1.4, maxZoom: 17, maxPitch: 75,
+      transformCameraUpdate: cam => cam.center ? { center: new maplibregl.LngLat(clamp(cam.center.lng, JAPAN_BOUNDS[0][0], JAPAN_BOUNDS[1][0]), clamp(cam.center.lat, JAPAN_BOUNDS[0][1], JAPAN_BOUNDS[1][1])) } : {},
       attributionControl: { compact: true },
     });
     map = m;
@@ -1199,13 +1201,17 @@
     m.on('load', async () => {
       el.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
       const firstLabel = (m.getStyle().layers.find(l => l.type === 'symbol') || {}).id;
+      // labels fade in once you're zoomed in on Japan, so the dark globe stays clean
+      m.getStyle().layers.filter(l => l.type === 'symbol').forEach(l => {
+        try { m.setPaintProperty(l.id, 'text-opacity', ['interpolate', ['linear'], ['zoom'], 3.6, 0, 4.4, 1]); m.setPaintProperty(l.id, 'icon-opacity', ['interpolate', ['linear'], ['zoom'], 3.6, 0, 4.4, 1]); } catch { /* layer without text */ }
+      });
       // real terrain: mountains rise when you tilt the map
       const dem = { type: 'raster-dem', tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'], encoding: 'terrarium', tileSize: 256, maxzoom: 12, attribution: 'Terrain: <a href="https://registry.opendata.aws/terrain-tiles/">Mapzen / AWS Open Data</a>' };
       m.addSource('dem', dem);
       m.addSource('dem-shade', { ...dem });
       m.addLayer({ id: 'relief', type: 'hillshade', source: 'dem-shade', paint: { 'hillshade-shadow-color': '#000000', 'hillshade-highlight-color': '#4a4a52', 'hillshade-accent-color': '#111114', 'hillshade-exaggeration': 0.55 } }, firstLabel);
       try { m.setTerrain({ source: 'dem', exaggeration: 1.3 }); } catch (e) { console.warn(e); }
-      try { m.setSky({ 'sky-color': '#0b0b10', 'horizon-color': '#1d1d27', 'fog-color': '#0b0b10', 'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.5, 'fog-ground-blend': 0.3, 'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 6, 0.6, 9, 0] }); } catch (e) { console.warn(e); }
+      try { m.setSky({ 'sky-color': '#0b0b10', 'horizon-color': '#1d1d27', 'fog-color': '#0b0b10', 'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.5, 'fog-ground-blend': 0.3, 'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 0.35, 5, 0.2, 8, 0] }); } catch (e) { console.warn(e); }
 
       m.addSource('places', { type: 'geojson', data: placesGeo() });
       m.addLayer({ id: 'places-glow', type: 'circle', source: 'places', paint: { 'circle-radius': 15, 'circle-color': ['get', 'color'], 'circle-opacity': ['case', ['==', ['get', 'want'], 1], 0.12, 0.28], 'circle-blur': 1, 'circle-pitch-alignment': 'viewport' } });
@@ -1218,7 +1224,7 @@
         const jp = await loadJapanShape();
         if (map !== m) return;
         m.addSource('not-japan', { type: 'geojson', data: jp.mask });
-        m.addLayer({ id: 'not-japan', type: 'fill', source: 'not-japan', paint: { 'fill-color': '#08080a', 'fill-opacity': 0.88 } }, 'places-glow');
+        m.addLayer({ id: 'not-japan', type: 'fill', source: 'not-japan', paint: { 'fill-color': '#060608', 'fill-opacity': 0.94, 'fill-antialias': false } }, 'places-glow');
         m.addSource('coast', { type: 'geojson', data: jp.coast, lineMetrics: true });
         m.addLayer({ id: 'coast', type: 'line', source: 'coast', paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.2, 8, 2], 'line-opacity': 0.75, 'line-gradient': ['interpolate', ['linear'], ['line-progress'], ...RAINBOW.flatMap((c, i) => [i / 6, c])] } }, 'places-glow');
       } catch (e) { console.warn('Japan outline unavailable', e); }
