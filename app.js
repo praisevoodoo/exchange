@@ -218,13 +218,23 @@
     return defaultState();
   }
 
+  const SYNC_KEY = 'exchange-sync-v1';
+  const hadData = !!(localStorage.getItem(STORE_KEY) || localStorage.getItem(OLD_KEY));
   let state = load();
   let storageOk = true;
-  function save() {
+  // edited = when this device last changed something; synced = the cloud copy's time at last sync
+  let syncMeta = (() => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || null; } catch { return null; } })()
+    || { edited: hadData ? 1 : 0, synced: 0 };
+  function persist() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); storageOk = true; }
     catch (e) { storageOk = false; toast('Could not save — browser storage may be full or disabled', RAINBOW[0]); }
   }
-  save();
+  function save() {
+    persist();
+    syncMeta.edited = Date.now(); writeMeta();
+    scheduleSync();
+  }
+  persist();
 
   /* ---------------- file storage (IndexedDB) ---------------- */
   const files = {
@@ -252,6 +262,190 @@
     del(id) { return this.tx('readwrite', s => s.delete(id)); },
     clear() { return this.tx('readwrite', s => s.clear()); },
   };
+
+
+  /* ---------------- cloud sync (Supabase) ----------------
+     The app always works from the copy saved on this device. When you're signed in,
+     the whole state is kept as one row per account, and the newest copy wins.
+     Attached files go to a private storage bucket, in a folder named after your account. */
+  const SUPABASE_URL = 'https://spfxutzadzukrynwaqhq.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_bxoICjWc8Z8gKbRx8EWS7w_U1VbWadk';
+  const BUCKET = 'attachments';
+  const sb = window.supabase && SUPABASE_KEY && !SUPABASE_KEY.startsWith('__')
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+  const sync = { user: null, status: sb ? 'signedout' : 'off', busy: false, again: false, timer: null, asking: false, uploading: false };
+
+  function writeMeta() { try { localStorage.setItem(SYNC_KEY, JSON.stringify(syncMeta)); } catch (e) { /* ignore */ } }
+
+  function syncLabel() {
+    const ago = syncMeta.synced ? relTime(syncMeta.synced) : '';
+    return {
+      off: '', signedout: '<a class="link" href="#settings">Turn on sync</a>',
+      syncing: 'syncing…', ok: `synced${ago ? ' · ' + ago : ''}`,
+      offline: 'offline — will sync later', error: '<span class="c1">sync problem</span> · <a class="link" data-action="sync-now">retry</a>',
+    }[sync.status] || '';
+  }
+  function relTime(ms) {
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} hr ago`;
+    return new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  }
+  function setStatus(s) {
+    sync.status = s;
+    const el = $('#sync-status'); if (el) el.innerHTML = syncLabel();
+    const box = $('#sync-box'); if (box && route() === 'settings') box.innerHTML = syncBoxHtml();
+  }
+
+  function scheduleSync(delay = 1200) {
+    if (!sb || !sync.user) return;
+    if (sync.busy) { sync.again = true; return; }
+    clearTimeout(sync.timer);
+    sync.timer = setTimeout(syncNow, delay);
+  }
+
+  function applyRemote(data) {
+    state = upgrade(normalize(data));
+    persist();
+    if (!modalStack.length) render();
+  }
+
+  async function pushLocal() {
+    const at = new Date(Math.max(syncMeta.edited || 0, 1)).toISOString();
+    const { error } = await sb.from('app_state').upsert({ user_id: sync.user.id, data: state, updated_at: at });
+    if (error) throw error;
+    syncMeta.synced = Date.parse(at);
+    if (!syncMeta.edited) syncMeta.edited = syncMeta.synced;
+  }
+
+  // first sign-in on a device that already has its own data, while the account has data too
+  function askWhichCopy() {
+    return new Promise(resolve => {
+      const el = showModal(`
+        <div class="modal-head"><div><div class="eyebrow"><span class="dot"></span>sync</div>
+        <h2>Which data should this device use?</h2>
+        <p>Your account already has saved data, and this device has its own. Pick which one to keep — the other is replaced on this device.</p></div></div>
+        <div class="modal-foot"><button class="btn" data-pick="device">Replace account with this device's data</button>
+        <button class="btn primary" data-pick="account">Use my account's data</button></div>`, { size: 'narrow' });
+      $$('[data-pick]', el).forEach(b => b.addEventListener('click', () => { closeModal(); resolve(b.dataset.pick); }));
+    });
+  }
+
+  async function syncNow() {
+    if (!sb || !sync.user) return;
+    if (sync.busy) { sync.again = true; return; }
+    sync.busy = true; setStatus('syncing');
+    try {
+      const { data: row, error } = await sb.from('app_state').select('data, updated_at').eq('user_id', sync.user.id).maybeSingle();
+      if (error) throw error;
+      const remoteAt = row ? Date.parse(row.updated_at) : 0;
+      const localAt = syncMeta.edited || 0;
+      if (row && !syncMeta.synced && localAt > 0 && !sync.asking) {
+        sync.asking = true;
+        const pick = await askWhichCopy();
+        sync.asking = false;
+        if (pick === 'account') { applyRemote(row.data); syncMeta.edited = syncMeta.synced = remoteAt; }
+        else { syncMeta.edited = Date.now(); await pushLocal(); }
+      } else if (row && remoteAt > localAt) {
+        if (remoteAt !== syncMeta.synced) applyRemote(row.data);
+        syncMeta.edited = syncMeta.synced = remoteAt;
+      } else if (!row || localAt > (syncMeta.synced || 0)) {
+        await pushLocal();
+      }
+      writeMeta();
+      setStatus('ok');
+      uploadPendingFiles();
+    } catch (e) {
+      console.error('sync failed', e);
+      setStatus(navigator.onLine ? 'error' : 'offline');
+    } finally {
+      sync.busy = false;
+      if (sync.again) { sync.again = false; scheduleSync(300); }
+    }
+  }
+
+  /* attachments in the cloud */
+  const cloudPath = id => `${sync.user.id}/${id}`;
+  async function uploadFile(id, rec) {
+    if (!sb || !sync.user) return false;
+    const { error } = await sb.storage.from(BUCKET).upload(cloudPath(id), rec.blob, { upsert: true, contentType: rec.type || 'application/octet-stream' });
+    if (error) { console.error(error); return false; }
+    return true;
+  }
+  async function deleteCloudFile(id) {
+    if (!sb || !sync.user || !id) return;
+    try { await sb.storage.from(BUCKET).remove([cloudPath(id)]); } catch (e) { console.error(e); }
+  }
+  async function uploadPendingFiles() {
+    if (!sb || !sync.user || sync.uploading) return;
+    sync.uploading = true;
+    let changed = false;
+    try {
+      for (const d of state.documents.filter(x => x.fileId && !x.fileCloud)) {
+        const rec = await files.get(d.fileId).catch(() => null);
+        if (rec && await uploadFile(d.fileId, rec)) { d.fileCloud = true; changed = true; }
+      }
+    } finally { sync.uploading = false; }
+    if (changed) save();
+  }
+  // this device's copy first, then the cloud (and keep a copy here for next time)
+  async function getFileRec(d) {
+    const local = await files.get(d.fileId).catch(() => null);
+    if (local) return local;
+    if (!sb || !sync.user || !d.fileCloud) return null;
+    const { data, error } = await sb.storage.from(BUCKET).download(cloudPath(d.fileId));
+    if (error || !data) { console.error(error); return null; }
+    const rec = { blob: data, name: d.fileName, type: d.fileType || data.type };
+    try { await files.put(d.fileId, rec); } catch (e) { console.error(e); }
+    return rec;
+  }
+
+  function syncBoxHtml() {
+    if (!sb) return `<p class="dim" style="margin:0;font-size:13px">Sync isn't available right now (offline, or not set up). Everything still saves on this device.</p>`;
+    if (!sync.user) return `
+      <form id="sync-form" class="form-grid" novalidate autocomplete="on">
+        <div class="field"><label for="sync-email">Email</label><input class="input" id="sync-email" name="email" type="email" autocomplete="email" required/></div>
+        <div class="field"><label for="sync-pass">Password</label><input class="input" id="sync-pass" name="password" type="password" autocomplete="current-password" minlength="6" required/></div>
+        <div class="field full"><div class="flex wrap">
+          <button type="submit" class="btn primary">Sign in</button>
+          <button type="button" class="btn" data-action="sync-signup">Create account</button>
+          <span class="dim" id="sync-msg" style="font-size:12.5px"></span>
+        </div></div>
+      </form>`;
+    return `<div class="flex wrap" style="align-items:center">
+        <div class="grow"><div style="color:var(--text)">${esc(sync.user.email || 'Signed in')}</div>
+          <div class="dim" style="font-size:12.5px;margin-top:2px">${sync.status === 'ok' ? `Synced ${syncMeta.synced ? relTime(syncMeta.synced) : ''}` : syncLabel()}</div></div>
+        <button class="btn sm" data-action="sync-now">Sync now</button>
+        <button class="btn sm ghost" data-action="sync-signout">Sign out</button>
+      </div>`;
+  }
+
+  function syncMsg(text, bad) { const m = $('#sync-msg'); if (m) { m.textContent = text; m.className = bad ? 'c1' : 'dim'; } }
+  function syncCreds() {
+    const f = $('#sync-form'); if (!f) return null;
+    const email = f.email.value.trim(), password = f.password.value;
+    if (!email || !password) { syncMsg('Enter your email and a password.', true); return null; }
+    if (password.length < 6) { syncMsg('Password needs at least 6 characters.', true); return null; }
+    return { email, password };
+  }
+
+  if (sb) {
+    sb.auth.onAuthStateChange((event, session) => {
+      // run outside the auth callback, as the Supabase docs recommend
+      setTimeout(() => {
+        const was = sync.user && sync.user.id;
+        sync.user = session ? session.user : null;
+        if (!sync.user) { setStatus('signedout'); if (route() === 'settings') render(); return; }
+        if (was !== sync.user.id) { setStatus('ok'); if (route() === 'settings') render(); syncNow(); }
+      }, 0);
+    });
+    const kick = () => { if (document.visibilityState === 'visible') scheduleSync(200); };
+    document.addEventListener('visibilitychange', kick);
+    window.addEventListener('focus', kick);
+    window.addEventListener('online', kick);
+    setInterval(() => { if (document.visibilityState === 'visible') scheduleSync(0); }, 60000);
+  }
 
   /* ---------------- money ---------------- */
   const S = () => state.settings;
@@ -772,6 +966,11 @@
     return `<div class="page">
       ${pageHead('settings', 'Settings', `${esc(HOME)} → ${esc(HOST)}, ${CITY}.`)}
 
+      <div class="settings-block">
+        <div><h3>Sync</h3><p>Sign in on your PC and your phone to keep them in step. Everything still works offline and catches up later.</p></div>
+        <div id="sync-box">${syncBoxHtml()}</div>
+      </div>
+
       <form id="settings-form" novalidate>
         <div class="settings-block">
           <div><h3>Dates</h3><p>Don't know the exact day yet? Pick the semester you're aiming for — the countdown and earnings use an estimate until you add the real date.</p></div>
@@ -797,7 +996,7 @@
       </form>
 
       <div class="settings-block">
-        <div><h3>Your data</h3><p>Stored in this browser only. Export now and then to keep a backup.</p></div>
+        <div><h3>Your data</h3><p>Saved on this device${sync.user ? ' and synced to your account' : ' only'}. Export now and then to keep a backup.</p></div>
         <div>
           <div class="flex wrap">
             <button class="btn" data-action="export">${icon('download')} Export backup</button>
@@ -846,21 +1045,23 @@
     if (file.size > 50 * 1024 * 1024) return 'That file is over 50 MB — please attach a smaller copy.';
     try {
       const id = doc.fileId || uid();
-      await files.put(id, { blob: file, name: file.name, type: file.type });
-      Object.assign(doc, { fileId: id, fileName: file.name, fileType: file.type });
+      const rec = { blob: file, name: file.name, type: file.type };
+      await files.put(id, rec);
+      Object.assign(doc, { fileId: id, fileName: file.name, fileType: file.type, fileCloud: false });
+      if (await uploadFile(id, rec)) doc.fileCloud = true;
     } catch (e) { console.error(e); return 'Could not store the file in this browser.'; }
   }
 
   async function deleteDoc(d) {
-    if (d.fileId) { try { await files.del(d.fileId); } catch (e) { console.error(e); } }
+    if (d.fileId) { try { await files.del(d.fileId); } catch (e) { console.error(e); } deleteCloudFile(d.fileId); }
     removeById('documents', d.id);
     commit('Document deleted', RAINBOW[0]);
   }
 
   async function openFile(d) {
     try {
-      const rec = await files.get(d.fileId);
-      if (!rec) { toast('Attachment not found in this browser', RAINBOW[0]); return; }
+      const rec = await getFileRec(d);
+      if (!rec) { toast(sync.user ? 'Attachment not found' : 'Attachment not on this device — sign in to sync it', RAINBOW[0]); return; }
       const url = URL.createObjectURL(rec.blob);
       const w = window.open(url, '_blank');
       if (!w) { const a = document.createElement('a'); a.href = url; a.download = rec.name; a.click(); }
@@ -899,7 +1100,7 @@
   async function exportData() {
     const attachments = {};
     for (const d of state.documents.filter(x => x.fileId)) {
-      try { const rec = await files.get(d.fileId); if (rec) attachments[d.fileId] = { name: rec.name, type: rec.type, data: await blobToDataURL(rec.blob) }; } catch (e) { console.error(e); }
+      try { const rec = await getFileRec(d); if (rec) attachments[d.fileId] = { name: rec.name, type: rec.type, data: await blobToDataURL(rec.blob) }; } catch (e) { console.error(e); }
     }
     const blob = new Blob([JSON.stringify({ app: 'exchange-journal', exported: new Date().toISOString(), state, attachments }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -926,6 +1127,7 @@
             try { const blob = await (await fetch(a.data)).blob(); await files.put(id, { blob, name: a.name, type: a.type }); } catch (e) { console.error(e); }
           }
           state = upgrade(incoming.version === 2 ? normalize(incoming) : fromV1(incoming));
+          state.documents.forEach(d => { d.fileCloud = false; });
           commit('Backup imported');
         },
       });
@@ -957,7 +1159,7 @@
     'doc-filter': el => { state.ui.docStatus = el.dataset.val; save(); render(); },
     'attach-file': el => { const d = find(state.documents, el.dataset.id); pickFile('', async f => { const err = await storeFile(d, f); if (err) toast(err, RAINBOW[0]); else commit('File attached', RAINBOW[3]); }); },
     'open-file': el => openFile(find(state.documents, el.dataset.id)),
-    'remove-file': el => { const d = find(state.documents, el.dataset.id); confirmDialog({ title: 'Remove attachment?', message: `“${esc(d.fileName)}” will be deleted from this browser. The document stays.`, confirm: 'Remove', onConfirm: async () => { try { await files.del(d.fileId); } catch (e) { console.error(e); } Object.assign(d, { fileId: null, fileName: '', fileType: '' }); commit('Attachment removed', RAINBOW[0]); } }); },
+    'remove-file': el => { const d = find(state.documents, el.dataset.id); confirmDialog({ title: 'Remove attachment?', message: `“${esc(d.fileName)}” will be deleted. The document stays.`, confirm: 'Remove', onConfirm: async () => { try { await files.del(d.fileId); } catch (e) { console.error(e); } deleteCloudFile(d.fileId); Object.assign(d, { fileId: null, fileName: '', fileType: '', fileCloud: false }); commit('Attachment removed', RAINBOW[0]); } }); },
     'starter-docs': () => { state.documents.push(...starterDocs()); commit('Document list added', RAINBOW[3]); },
 
     'wish-filter': el => { state.ui.wishCat = el.dataset.val; save(); render(); },
@@ -971,13 +1173,28 @@
     'toggle-ms': el => { const m = find(state.milestones, el.dataset.id); m.done = !m.done; commit(m.done ? 'Milestone complete' : 'Marked not done', m.done ? RAINBOW[3] : RAINBOW[2]); },
     'starter-ms': () => { state.milestones.push(...starterMs()); commit('Milestone list added', RAINBOW[6]); },
 
+    'sync-now': () => { if (sync.user) syncNow(); else go('settings'); },
+    'sync-signout': () => confirmDialog({ title: 'Sign out?', message: 'Your data stays on this device, but changes stop syncing until you sign in again.', confirm: 'Sign out', danger: false, onConfirm: async () => { await sb.auth.signOut(); } }),
+    'sync-signup': async () => {
+      const c = syncCreds(); if (!c) return;
+      syncMsg('Creating account…');
+      const { data, error } = await sb.auth.signUp({ ...c, options: { emailRedirectTo: location.origin + location.pathname } });
+      if (error) { syncMsg(error.message, true); return; }
+      if (!data.session) syncMsg('Check your email and click the confirm link, then come back and sign in here.');
+    },
     'export': () => exportData(),
     'import': () => pickFile('application/json,.json', importData),
     'reset': () => confirmDialog({
       title: 'Reset all data?', confirm: 'Yes, delete everything',
-      message: 'This deletes your saved amount, documents, attachments, milestones and budget edits in this browser. Consider exporting a backup first. <b style="color:var(--text)">This cannot be undone.</b>',
+      message: 'This deletes your saved amount, documents, attachments, milestones, Japan list and budget edits — on every device, if you\'re signed in to sync. Consider exporting a backup first. <b style="color:var(--text)">This cannot be undone.</b>',
       onConfirm: async () => {
         try { await files.clear(); } catch (e) { console.error(e); }
+        if (sb && sync.user) {
+          try {
+            const { data } = await sb.storage.from(BUCKET).list(sync.user.id, { limit: 1000 });
+            if (data && data.length) await sb.storage.from(BUCKET).remove(data.map(f => cloudPath(f.name)));
+          } catch (e) { console.error(e); }
+        }
         localStorage.removeItem(STORE_KEY);
         localStorage.removeItem(OLD_KEY);
         state = defaultState();
@@ -1006,7 +1223,8 @@
     $('#sidebar-foot').innerHTML = (d >= 0
       ? `<div class="foot-count num">${dp.approx ? '~' : ''}${d}</div><div class="foot-label">days to ${CITY}${dp.approx ? ' · estimate' : ''}</div>`
       : `<div class="foot-label" style="margin-top:0">お疲れ様 — you made it</div>`)
-      + `<div class="foot-bar" title="${Math.round(pct)}% of your goal saved"><span style="width:${pct}%"></span></div><div class="foot-label" style="margin-top:8px">${Math.round(pct)}% saved</div>`;
+      + `<div class="foot-bar" title="${Math.round(pct)}% of your goal saved"><span style="width:${pct}%"></span></div><div class="foot-label" style="margin-top:8px">${Math.round(pct)}% saved</div>`
+      + (sb ? `<div class="foot-label" id="sync-status" style="margin-top:10px">${syncLabel()}</div>` : '');
   }
 
   function render() {
@@ -1078,6 +1296,13 @@
   });
 
   document.addEventListener('submit', e => {
+    if (e.target.id === 'sync-form') {
+      e.preventDefault();
+      const c = syncCreds(); if (!c) return;
+      syncMsg('Signing in…');
+      sb.auth.signInWithPassword(c).then(({ error }) => { if (error) syncMsg(error.message === 'Invalid login credentials' ? 'Wrong email or password.' : error.message, true); });
+      return;
+    }
     if (e.target.id === 'wish-form') {
       e.preventDefault();
       const fd = new FormData(e.target);
@@ -1114,7 +1339,10 @@
   window.addEventListener('hashchange', () => { render(); window.scrollTo({ top: 0 }); $('#main').focus({ preventScroll: true }); });
 
   // keep tabs in sync if the app is open in two windows
-  window.addEventListener('storage', e => { if (e.key === STORE_KEY) { state = load(); render(); } });
+  window.addEventListener('storage', e => {
+    if (e.key === STORE_KEY) { state = load(); render(); }
+    if (e.key === SYNC_KEY) { try { syncMeta = JSON.parse(e.newValue) || syncMeta; } catch { /* ignore */ } }
+  });
 
   // refresh countdowns after midnight
   let lastDay = today();
