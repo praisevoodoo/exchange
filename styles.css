@@ -688,3 +688,38 @@ mark { background: rgba(230,200,120,.22); color: var(--text); border-radius: 2px
 .lightbox-img img { max-width: 100%; max-height: 62vh; object-fit: contain; display: block; }
 .caption-input { font-family: 'Caveat', cursive; font-size: 22px; }
 @media (max-width: 560px) { .polaroids { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 16px; } .polaroid .cap { font-size: 18px; } }
+
+/* ---------- map ---------- */
+.map { height: 520px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #0d0d0e; margin-top: 4px; }
+.map.picking, .map.picking .leaflet-container { cursor: crosshair !important; }
+.map.picking { outline: 1px solid var(--r5); }
+.map-off { display: flex; height: 100%; align-items: center; justify-content: center; color: var(--dim); font-size: 13px; }
+.map-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--c); border: 2px solid var(--c); flex: none; }
+.map-dot.want { background: transparent; }
+.map.leaflet-container { background: #0d0d0e; font-family: var(--sans); }
+.map .leaflet-popup-content-wrapper, .map .leaflet-popup-tip { background: #161618; color: var(--text); border: 1px solid var(--line); box-shadow: 0 14px 30px -10px rgba(0,0,0,.8); }
+.map .leaflet-popup-content { margin: 14px 16px; }
+.map.leaflet-container a.leaflet-popup-close-button, .map a.leaflet-popup-close-button { color: var(--dim); }
+.map .leaflet-bar a { background: #161618; color: var(--text-2); border-color: var(--line); }
+.map .leaflet-bar a:hover { background: #1f1f22; color: var(--text); }
+.map .leaflet-control-attribution { background: rgba(10,10,11,.7) !important; color: #6b6b70; }
+.map .leaflet-control-attribution a { color: #8c8c92; }
+.pop-title { font-family: var(--serif); font-size: 20px; line-height: 1.15; }
+.pop-meta { font-size: 12px; color: var(--dim); margin: 4px 0 8px; }
+.pop-notes { font-size: 12.5px; color: var(--text-2); margin-bottom: 10px; white-space: pre-wrap; }
+.pop-photos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 6px 0 12px; }
+.polaroid.mini { padding: 4px 4px 12px; cursor: default; display: block; box-shadow: 0 4px 10px -4px rgba(0,0,0,.8); }
+.polaroid.mini:hover { transform: rotate(var(--tilt, 0deg)); box-shadow: 0 4px 10px -4px rgba(0,0,0,.8); }
+.place-results { display: grid; gap: 4px; margin-top: 8px; max-height: 220px; overflow: auto; }
+.place-result { display: flex; flex-direction: column; text-align: left; gap: 2px; background: none; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--text); cursor: pointer; font: inherit; }
+.place-result:hover { border-color: var(--r5); }
+.place-result b { font-weight: 500; font-size: 13.5px; }
+.place-result span { font-size: 11.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.place-results svg { width: 12px; height: 12px; vertical-align: -1px; }
+.photo-pick { display: grid; grid-template-columns: repeat(auto-fill, minmax(78px, 1fr)); gap: 12px; max-height: 240px; overflow: auto; padding: 4px; }
+.photo-pick .pick { cursor: pointer; position: relative; border-radius: 3px; opacity: .55; transition: opacity .2s; }
+.photo-pick .pick.on { opacity: 1; outline: 2px solid var(--r5); outline-offset: 3px; }
+.photo-pick input { position: absolute; opacity: 0; pointer-events: none; }
+.photo-pick .polaroid.mini { cursor: pointer; }
+@media (max-width: 560px) { .map { height: 380px; } }
+.map .dark-tiles { filter: invert(1) hue-rotate(180deg) brightness(.82) contrast(.9) saturate(.35); }

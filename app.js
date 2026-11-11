@@ -25,6 +25,7 @@
     { id: 'timeline', label: 'Timeline', color: RAINBOW[6] },
     { id: 'list', label: 'Japan list', color: RAINBOW[5] },
     { id: 'photos', label: 'Photos', color: RAINBOW[2] },
+    { id: 'map', label: 'Map', color: RAINBOW[4] },
     { id: 'settings', label: 'Settings', color: NEUTRAL },
   ];
 
@@ -166,7 +167,8 @@
       milestones: starterMs(),
       wishes: [],
       photos: [],
-      ui: { editItems: false, docStatus: '', wishCat: '', wishCatAdd: 'Places' },
+      places: [],
+      ui: { editItems: false, docStatus: '', wishCat: '', wishCatAdd: 'Places', placeFilter: '' },
     };
   }
 
@@ -206,6 +208,7 @@
       milestones: Array.isArray(s.milestones) ? s.milestones : base.milestones,
       wishes: Array.isArray(s.wishes) ? s.wishes : [],
       photos: Array.isArray(s.photos) ? s.photos : [],
+      places: Array.isArray(s.places) ? s.places : [],
       ui: { ...base.ui, ...(s.ui || {}) },
       seeded: Array.isArray(s.seeded) ? s.seeded : [],
     };
@@ -1033,6 +1036,7 @@
       if (photoUrls.has(id)) { URL.revokeObjectURL(photoUrls.get(id)); photoUrls.delete(id); }
     }
     removeById('photos', p.id);
+    state.places.forEach(pl => { if (pl.photoIds) pl.photoIds = pl.photoIds.filter(x => x !== p.id); });
   }
 
   // a gentle, stable tilt for each polaroid
@@ -1095,6 +1099,202 @@
     });
   }
 
+  /* ---------------- map ----------------
+     Leaflet + OpenStreetMap tiles (darkened with CSS), loaded only when you open the page.
+     Place search uses OpenStreetMap's Nominatim, only when you press Search. */
+  const PLACE_KINDS = ['Sights', 'Food', 'Nature', 'City', 'Stay', 'Shopping', 'Other'];
+  const placeColor = p => catColor(PLACE_KINDS, p.kind);
+  let leafletLoading = null, map = null, mapView = null, pickMode = false, focusId = null;
+  const markers = {};
+
+  function loadLeaflet() {
+    if (window.L) return Promise.resolve();
+    if (!leafletLoading) leafletLoading = new Promise((resolve, reject) => {
+      const css = document.createElement('link');
+      css.rel = 'stylesheet'; css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(css);
+      const js = document.createElement('script');
+      js.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      js.onload = resolve;
+      js.onerror = () => { leafletLoading = null; reject(new Error('map failed to load')); };
+      document.head.appendChild(js);
+    });
+    return leafletLoading;
+  }
+
+  const shownPlaces = () => state.places.filter(p => !state.ui.placeFilter || p.status === state.ui.placeFilter);
+  const placePhotos = p => (p.photoIds || []).map(id => find(state.photos, id)).filter(Boolean);
+
+  function placePopup(p) {
+    const ph = placePhotos(p);
+    return `<div class="pop">
+      <div class="pop-title">${esc(p.name)}</div>
+      <div class="pop-meta"><span class="pill" style="--c:${placeColor(p)}"><span class="sw"></span>${esc(p.kind)}</span> · ${p.status === 'want' ? 'want to go' : p.date ? fmtDate(p.date) : 'been here'}</div>
+      ${p.notes ? `<div class="pop-notes">${esc(p.notes)}</div>` : ''}
+      ${ph.length ? `<div class="pop-photos">${ph.slice(0, 6).map(x => `<span class="polaroid mini" style="--tilt:${tilt(x.id)}deg"><span class="photo"><img data-photo="${x.id}" alt=""/></span></span>`).join('')}</div>` : ''}
+      <button class="btn sm" data-action="place-edit" data-id="${p.id}">${icon('edit')} Edit</button>
+    </div>`;
+  }
+
+  async function mountMap() {
+    const el = $('#map');
+    if (!el) return;
+    try { await loadLeaflet(); }
+    catch { el.innerHTML = '<div class="map-off">The map needs an internet connection to load.</div>'; return; }
+    if (!document.contains(el)) return;
+    if (map) { try { mapView = { c: map.getCenter(), z: map.getZoom() }; map.remove(); } catch { /* old map already gone */ } }
+    Object.keys(markers).forEach(k => delete markers[k]);
+    map = L.map(el, { zoomControl: true, worldCopyJump: true });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19, className: 'dark-tiles',
+    }).addTo(map);
+    const pts = [];
+    shownPlaces().forEach(p => {
+      const c = placeColor(p);
+      const m = L.circleMarker([p.lat, p.lng], { radius: 8, color: c, weight: 2, fillColor: c, fillOpacity: p.status === 'want' ? 0.12 : 0.85 }).addTo(map);
+      m.bindPopup(() => placePopup(p), { maxWidth: 280, minWidth: 200 });
+      m.on('popupopen', e => hydratePhotos(e.popup.getElement()));
+      markers[p.id] = m;
+      pts.push([p.lat, p.lng]);
+    });
+    if (mapView) map.setView(mapView.c, mapView.z);
+    else if (pts.length > 1) map.fitBounds(pts, { padding: [40, 40], maxZoom: 12 });
+    else if (pts.length) map.setView(pts[0], 11);
+    else map.setView([36.2, 138.25], 5);
+    map.on('click', e => {
+      if (!pickMode) return;
+      pickMode = false; el.classList.remove('picking');
+      const moving = pendingMove ? find(state.places, pendingMove) : null;
+      pendingMove = null;
+      placeForm(moving, { lat: e.latlng.lat, lng: e.latlng.lng });
+    });
+    if (pickMode) el.classList.add('picking');
+    if (focusId && markers[focusId]) { const m = markers[focusId]; map.setView(m.getLatLng(), Math.max(map.getZoom(), 13)); m.openPopup(); }
+    focusId = null;
+  }
+
+  function pageMap() {
+    const all = state.places, f = state.ui.placeFilter;
+    const been = all.filter(p => p.status !== 'want').length, want = all.length - been;
+    const list = shownPlaces().slice().sort((a, b) => (a.status === 'want') - (b.status === 'want') || (b.date || '').localeCompare(a.date || '') || b.created - a.created);
+    return `<div class="page">
+      ${pageHead('map', 'Where I\'ve <em>been</em>', 'Pin the places you go — and the ones you still want to see.',
+        `<button class="btn primary" data-action="place-add">${icon('plus')} Add place</button>`)}
+      <div class="toolbar">
+        <div class="chips">
+          <button class="chip ${!f ? 'on' : ''}" data-action="place-filter" data-val="">All <span class="ct">${all.length}</span></button>
+          <button class="chip ${f === 'been' ? 'on' : ''}" style="--c:${RAINBOW[3]}" data-action="place-filter" data-val="been"><span class="sw"></span>Been there <span class="ct">${been}</span></button>
+          <button class="chip ${f === 'want' ? 'on' : ''}" style="--c:${RAINBOW[5]}" data-action="place-filter" data-val="want"><span class="sw"></span>Want to go <span class="ct">${want}</span></button>
+        </div>
+        <div class="grow"></div>
+        <span class="dim" style="font-size:11.5px">Filled pins = been there · hollow = want to go</span>
+      </div>
+      <div id="map" class="map"></div>
+      <section class="section">
+        ${list.length ? `<div class="rows">${list.map(p => `<div class="row" style="align-items:center">
+            <span class="map-dot ${p.status === 'want' ? 'want' : ''}" style="--c:${placeColor(p)}"></span>
+            <div class="grow"><div class="row-title" data-action="place-focus" data-id="${p.id}" style="cursor:pointer">${esc(p.name)}</div>
+              <div class="row-meta"><span class="tag">${esc(p.kind)}</span><span>${p.status === 'want' ? 'want to go' : p.date ? fmtDate(p.date) : 'been here'}</span>${placePhotos(p).length ? `<span>${plural(placePhotos(p).length, 'photo')}</span>` : ''}${p.notes ? `<span class="muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:380px">${esc(p.notes)}</span>` : ''}</div></div>
+            <div class="actions"><button class="icon-btn" data-action="place-edit" data-id="${p.id}" aria-label="Edit">${icon('edit')}</button><button class="icon-btn del" data-action="place-del" data-id="${p.id}" aria-label="Delete">${icon('trash')}</button></div>
+          </div>`).join('')}</div>`
+          : `<div class="rows">${all.length ? emptyState('Nothing here', 'No places with this filter.', `<button class="btn sm" data-action="place-filter" data-val="">Show all</button>`)
+            : emptyState('No places yet', 'Search for a place or tap a spot on the map to drop your first pin.', `<button class="btn primary sm" data-action="place-add">${icon('plus')} Add place</button>`)}</div>`}
+      </section>
+    </div>`;
+  }
+
+  function placeForm(p, preset = {}) {
+    const v = p ? { ...p, ...(preset.lat != null ? { lat: preset.lat, lng: preset.lng } : {}) } : { name: preset.name || '', lat: preset.lat ?? null, lng: preset.lng ?? null, kind: 'Sights', status: 'been', date: today(), notes: '', photoIds: [] };
+    const photos = state.photos.slice().sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+    const locText = () => v.lat != null ? `Pinned at ${v.lat.toFixed(4)}, ${v.lng.toFixed(4)}` : 'No location yet — search above or pick a spot on the map';
+    const el = showModal(`
+      <form novalidate>
+        <div class="modal-head"><div><div class="eyebrow"><span class="dot"></span>map</div><h2>${p ? 'Edit place' : 'Add a place'}</h2></div>
+          <button type="button" class="icon-btn" data-close aria-label="Close">${icon('x')}</button></div>
+        <div class="modal-body">
+          <div class="field"><label for="pl-q">${p ? 'Move the pin — search' : 'Search for a place'}</label>
+            <div class="flex" style="gap:8px"><input class="input" id="pl-q" placeholder="e.g. Fushimi Inari, Kyoto" autocomplete="off"/><button type="button" class="btn" data-search>Search</button></div>
+            <div class="place-results" data-results></div>
+            <div class="flex wrap" style="margin-top:8px;align-items:center"><span class="dim" style="font-size:12px" data-loc>${locText()}</span><button type="button" class="btn sm ghost" data-pick>Pick on the map instead</button></div>
+          </div>
+          <div class="divider"></div>
+          <div class="form-grid">
+            <div class="field full"><label for="pl-name">Name *</label><input class="input" id="pl-name" name="name" value="${esc(v.name)}" placeholder="What do you call it?" autocomplete="off"/></div>
+            <div class="field"><label>Status</label><div class="seg" data-status>${[['been', 'Been there'], ['want', 'Want to go']].map(([k, l]) => `<button type="button" data-val="${k}" class="${v.status === k ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+            <div class="field"><label for="pl-kind">Type</label><select class="select" id="pl-kind" name="kind">${options(PLACE_KINDS, v.kind)}</select></div>
+            <div class="field"><label for="pl-date">Date</label><input class="input" id="pl-date" name="date" type="date" value="${esc(v.date || '')}"/><span class="hint">When you went (leave blank for want-to-go)</span></div>
+            <div class="field full"><label for="pl-notes">Notes</label><textarea class="textarea" id="pl-notes" name="notes" placeholder="What it was like, who you went with…">${esc(v.notes)}</textarea></div>
+            ${photos.length ? `<div class="field full"><label>Photos from here</label><div class="photo-pick">${photos.map(x => `<label class="pick ${v.photoIds.includes(x.id) ? 'on' : ''}"><input type="checkbox" value="${x.id}" ${v.photoIds.includes(x.id) ? 'checked' : ''}/><span class="polaroid mini"><span class="photo"><img data-photo="${x.id}" alt=""/></span></span></label>`).join('')}</div></div>` : ''}
+          </div>
+          <div class="form-error"></div>
+        </div>
+        <div class="modal-foot">
+          ${p ? `<button type="button" class="btn danger left" data-del>${icon('trash')} Delete</button>` : ''}
+          <button type="button" class="btn" data-close>Cancel</button>
+          <button type="submit" class="btn primary">${p ? 'Save' : 'Add to map'}</button>
+        </div>
+      </form>`, { size: 'wide' });
+    hydratePhotos(el);
+    const err = t => { $('.form-error', el).textContent = t; };
+
+    $('[data-status]', el).addEventListener('click', e => {
+      const b = e.target.closest('button'); if (!b) return;
+      v.status = b.dataset.val;
+      $$('[data-status] button', el).forEach(x => x.classList.toggle('on', x === b));
+    });
+    $$('.photo-pick input', el).forEach(c => c.addEventListener('change', () => c.closest('.pick').classList.toggle('on', c.checked)));
+
+    const search = async () => {
+      const q = $('#pl-q', el).value.trim();
+      const box = $('[data-results]', el);
+      if (!q) return;
+      box.innerHTML = '<div class="dim" style="font-size:12px;padding:8px 0">Searching…</div>';
+      try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=6&accept-language=en&q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        if (!data.length) { box.innerHTML = '<div class="dim" style="font-size:12px;padding:8px 0">No matches — try adding the city, or pick on the map.</div>'; return; }
+        box.innerHTML = data.map((r, i) => `<button type="button" class="place-result" data-i="${i}"><b>${esc(r.name || r.display_name.split(',')[0])}</b><span>${esc(r.display_name)}</span></button>`).join('');
+        $$('.place-result', box).forEach(b => b.addEventListener('click', () => {
+          const r = data[Number(b.dataset.i)];
+          v.lat = Number(r.lat); v.lng = Number(r.lon);
+          const nm = $('#pl-name', el);
+          if (!nm.value.trim()) nm.value = r.name || r.display_name.split(',')[0];
+          $('[data-loc]', el).textContent = locText();
+          box.innerHTML = `<div class="c4" style="font-size:12px;padding:8px 0">${icon('check')} ${esc(r.display_name)}</div>`;
+        }));
+      } catch (e) { console.error(e); box.innerHTML = '<div class="c1" style="font-size:12px;padding:8px 0">Search didn\'t work — check your connection, or pick on the map.</div>'; }
+    };
+    $('[data-search]', el).addEventListener('click', search);
+    $('#pl-q', el).addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); search(); } });
+
+    $('[data-pick]', el).addEventListener('click', () => {
+      closeModal();
+      if (route() !== 'map') go('map');
+      pickMode = true;
+      $('#map')?.classList.add('picking');
+      toast('Tap the map where the place is', RAINBOW[4]);
+      if (p) pendingMove = p.id;
+    });
+    if (p) $('[data-del]', el).addEventListener('click', () => confirmDialog({ title: 'Delete this place?', message: `“${esc(p.name)}” will be removed from your map. Its photos stay.`, onConfirm: () => { closeModal(); removeById('places', p.id); commit('Place removed', RAINBOW[0]); } }));
+
+    $('form', el).addEventListener('submit', e => {
+      e.preventDefault();
+      const f = e.target;
+      const name = f.name.value.trim();
+      if (!name) { err('Give the place a name.'); f.name.focus(); return; }
+      if (v.lat == null) { err('Search for the place or pick it on the map first.'); return; }
+      const data = { name, kind: f.kind.value, status: v.status, date: f.date.value, notes: f.notes.value.trim(), lat: v.lat, lng: v.lng, photoIds: $$('.photo-pick input:checked', el).map(c => c.value) };
+      if (p) Object.assign(p, data);
+      else state.places.push({ id: uid(), created: Date.now(), ...data });
+      closeModal();
+      focusId = p ? p.id : state.places[state.places.length - 1].id;
+      mapView = null;
+      commit(p ? 'Place updated' : 'Pinned to your map', RAINBOW[4]);
+    });
+  }
+  let pendingMove = null;
+
   /* ---------------- settings ---------------- */
   function pageSettings() {
     const s = S();
@@ -1140,7 +1340,7 @@
             <span class="dim mono" style="font-size:11px">${(usage / 1024).toFixed(1)} KB used · ${storageOk ? 'saved' : 'save failed'}</span>
           </div>
           <div class="danger-zone mt-24">
-            <div><div style="color:var(--text)">Start over</div><div class="dim" style="font-size:12.5px">Deletes your saved amount, documents, attachments, milestones, Japan list and photos, and resets the budget to Sophia defaults.</div></div>
+            <div><div style="color:var(--text)">Start over</div><div class="dim" style="font-size:12.5px">Deletes your saved amount, documents, attachments, milestones, Japan list, photos and map, and resets the budget to Sophia defaults.</div></div>
             <button class="btn danger" data-action="reset">${icon('trash')} Reset all data</button>
           </div>
         </div>
@@ -1311,6 +1511,11 @@
       inp.onchange = () => inp.files.length && addPhotos(inp.files);
       inp.click();
     },
+    'place-add': () => placeForm(null),
+    'place-edit': el => { const p = find(state.places, el.dataset.id); if (p) placeForm(p); },
+    'place-del': el => { const p = find(state.places, el.dataset.id); confirmDialog({ title: 'Delete this place?', message: `“${esc(p.name)}” will be removed from your map. Its photos stay.`, onConfirm: () => { removeById('places', p.id); commit('Place removed', RAINBOW[0]); } }); },
+    'place-focus': el => { focusId = el.dataset.id; mountMap(); $('#map')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); },
+    'place-filter': el => { state.ui.placeFilter = el.dataset.val; mapView = null; save(); render(); },
     'photo-open': el => photoModal(find(state.photos, el.dataset.id)),
     'wish-filter': el => { state.ui.wishCat = el.dataset.val; save(); render(); },
     'wish-toggle': el => { const w = find(state.wishes, el.dataset.id); w.done = !w.done; w.doneAt = w.done ? today() : ''; commit(w.done ? 'Done — nice' : 'Marked not done', w.done ? RAINBOW[3] : RAINBOW[2]); },
@@ -1357,7 +1562,7 @@
   /* ==========================================================
      ROUTER / RENDER
      ========================================================== */
-  const PAGES = { budget: pageBudget, earnings: pageEarnings, documents: pageDocuments, timeline: pageTimeline, list: pageList, photos: pagePhotos, settings: pageSettings };
+  const PAGES = { budget: pageBudget, earnings: pageEarnings, documents: pageDocuments, timeline: pageTimeline, list: pageList, photos: pagePhotos, map: pageMap, settings: pageSettings };
   const route = () => { const h = location.hash.replace('#', ''); return PAGES[h] ? h : 'budget'; };
   function go(r) { if (location.hash !== '#' + r) location.hash = r; else render(); }
 
@@ -1385,6 +1590,7 @@
     renderNav();
     $('#main').innerHTML = PAGES[r]();
     if (r === 'photos') hydratePhotos($('#main'));
+    if (r === 'map') mountMap(); else { pickMode = false; pendingMove = null; }
   }
 
   /* ---------------- global events ---------------- */
