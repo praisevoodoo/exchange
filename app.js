@@ -24,6 +24,7 @@
     { id: 'documents', label: 'Documents', color: RAINBOW[4] },
     { id: 'timeline', label: 'Timeline', color: RAINBOW[6] },
     { id: 'list', label: 'Japan list', color: RAINBOW[5] },
+    { id: 'photos', label: 'Photos', color: RAINBOW[2] },
     { id: 'settings', label: 'Settings', color: NEUTRAL },
   ];
 
@@ -164,6 +165,7 @@
       documents: starterDocs(),
       milestones: starterMs(),
       wishes: [],
+      photos: [],
       ui: { editItems: false, docStatus: '', wishCat: '', wishCatAdd: 'Places' },
     };
   }
@@ -203,6 +205,7 @@
       documents: Array.isArray(s.documents) ? s.documents : base.documents,
       milestones: Array.isArray(s.milestones) ? s.milestones : base.milestones,
       wishes: Array.isArray(s.wishes) ? s.wishes : [],
+      photos: Array.isArray(s.photos) ? s.photos : [],
       ui: { ...base.ui, ...(s.ui || {}) },
       seeded: Array.isArray(s.seeded) ? s.seeded : [],
     };
@@ -385,6 +388,10 @@
       for (const d of state.documents.filter(x => x.fileId && !x.fileCloud)) {
         const rec = await files.get(d.fileId).catch(() => null);
         if (rec && await uploadFile(d.fileId, rec)) { d.fileCloud = true; changed = true; }
+      }
+      for (const p of state.photos.filter(x => !x.cloud)) {
+        const full = await files.get(p.full).catch(() => null), thumb = await files.get(p.thumb).catch(() => null);
+        if (full && thumb && await uploadFile(p.full, full) && await uploadFile(p.thumb, thumb)) { p.cloud = true; changed = true; }
       }
     } finally { sync.uploading = false; }
     if (changed) save();
@@ -959,6 +966,135 @@
     });
   }
 
+  /* ---------------- photos ----------------
+     Each photo is shrunk before saving (a full copy up to 1600px and a small one
+     for the wall), stored on this device, and synced to your account like attachments. */
+  const photoRec = (p, which) => ({ fileId: which === 'thumb' ? p.thumb : p.full, fileCloud: p.cloud, fileName: `${p.id}.jpg`, fileType: 'image/jpeg' });
+  const photoUrls = new Map();
+  async function photoUrl(p, which = 'thumb') {
+    const id = which === 'thumb' ? p.thumb : p.full;
+    if (photoUrls.has(id)) return photoUrls.get(id);
+    const rec = await getFileRec(photoRec(p, which));
+    if (!rec) return null;
+    const url = URL.createObjectURL(rec.blob);
+    photoUrls.set(id, url);
+    return url;
+  }
+  function hydratePhotos(root = document) {
+    $$('img[data-photo]', root).forEach(async img => {
+      const p = find(state.photos, img.dataset.photo);
+      if (!p) return;
+      const url = await photoUrl(p, img.dataset.size || 'thumb');
+      if (url) { img.src = url; img.closest('.polaroid, .lightbox-img')?.classList.add('loaded'); }
+      else img.closest('.polaroid, .lightbox-img')?.classList.add('missing');
+    });
+  }
+
+  function shrinkImage(file, max, quality) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.naturalWidth * scale); c.height = Math.round(img.naturalHeight * scale);
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        c.toBlob(b => b ? resolve(b) : reject(new Error('encode failed')), 'image/jpeg', quality);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('unreadable image')); };
+      img.src = url;
+    });
+  }
+
+  async function addPhotos(list) {
+    const imgs = [...list].filter(f => f.type.startsWith('image/') || /\.(jpe?g|png|heic|heif|webp|gif)$/i.test(f.name));
+    if (!imgs.length) { toast('Pick some photos to add', RAINBOW[2]); return; }
+    toast(`Adding ${plural(imgs.length, 'photo')}…`, RAINBOW[2]);
+    let added = 0, failed = 0;
+    for (const f of imgs) {
+      try {
+        const [full, thumb] = await Promise.all([shrinkImage(f, 1600, 0.85), shrinkImage(f, 600, 0.8)]);
+        const p = { id: uid(), created: Date.now(), date: f.lastModified ? ymd(new Date(f.lastModified)) : today(), caption: '', place: '', full: uid(), thumb: uid(), cloud: false };
+        await files.put(p.full, { blob: full, name: `${p.id}.jpg`, type: 'image/jpeg' });
+        await files.put(p.thumb, { blob: thumb, name: `${p.id}-small.jpg`, type: 'image/jpeg' });
+        state.photos.push(p);
+        added++;
+      } catch (e) { console.error(e); failed++; }
+    }
+    if (added) commit(`${plural(added, 'photo')} added${failed ? ` · ${failed} couldn't be read` : ''} — tap one to write on it`, RAINBOW[2]);
+    else toast('Couldn\'t read those photos — try JPG or PNG', RAINBOW[0]);
+  }
+
+  async function deletePhoto(p) {
+    for (const id of [p.full, p.thumb]) {
+      try { await files.del(id); } catch (e) { console.error(e); }
+      if (p.cloud) deleteCloudFile(id);
+      if (photoUrls.has(id)) { URL.revokeObjectURL(photoUrls.get(id)); photoUrls.delete(id); }
+    }
+    removeById('photos', p.id);
+  }
+
+  // a gentle, stable tilt for each polaroid
+  const tilt = id => { let h = 0; for (const c of id) h = (h * 31 + c.charCodeAt(0)) | 0; return ((Math.abs(h) % 70) / 10 - 3.5).toFixed(1); };
+
+  function pagePhotos() {
+    const photos = state.photos.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.created - a.created);
+    let html = '', lastMonth = '';
+    for (const p of photos) {
+      const m = (p.date || '').slice(0, 7);
+      if (m !== lastMonth) {
+        if (lastMonth) html += '</div>';
+        html += `<div class="photo-month">${p.date ? fmtDate(p.date, { month: 'long', year: 'numeric' }) : 'No date'}</div><div class="polaroids">`;
+        lastMonth = m;
+      }
+      html += `<button class="polaroid" style="--tilt:${tilt(p.id)}deg;--tape:${rc(p.id.charCodeAt(p.id.length - 1))}" data-action="photo-open" data-id="${p.id}" aria-label="${esc(p.caption || 'Photo')}">
+        <span class="tape"></span>
+        <span class="photo"><img data-photo="${p.id}" alt="${esc(p.caption || 'Photo')}"/></span>
+        <span class="cap">${p.caption ? esc(p.caption) : '<span class="dim">tap to write…</span>'}</span>
+        <span class="meta">${p.place ? esc(p.place) + ' · ' : ''}${p.date ? fmtDate(p.date, { month: 'short', day: 'numeric' }) : ''}</span>
+      </button>`;
+    }
+    if (photos.length) html += '</div>';
+
+    return `<div class="page" data-drop-photos>
+      ${pageHead('photos', 'Pictures from <em>Japan</em>', 'Add the photos you take, and write a little something on each one.',
+        `<button class="btn primary" data-action="photo-add">${icon('plus')} Add photos</button>`)}
+      ${photos.length
+        ? `<p class="dim mono" style="font-size:11px;margin:0 0 6px">${plural(photos.length, 'photo')} · drag photos onto the page to add more</p>${html}`
+        : `<div class="rows">${emptyState('No photos yet', 'Once you\'re in Japan, add the photos you take — they\'ll show up here as polaroids.', `<button class="btn primary sm" data-action="photo-add">${icon('plus')} Add photos</button>`)}</div>`}
+    </div>`;
+  }
+
+  function photoModal(p) {
+    const el = showModal(`
+      <form novalidate>
+        <div class="lightbox-img"><img data-photo="${p.id}" data-size="full" alt="${esc(p.caption || 'Photo')}"/></div>
+        <div class="modal-body"><div class="form-grid">
+          <div class="field full"><label for="ph-cap">Caption</label><input class="input caption-input" id="ph-cap" name="caption" value="${esc(p.caption)}" placeholder="What was happening?" maxlength="120" autocomplete="off"/></div>
+          <div class="field"><label for="ph-place">Place</label><input class="input" id="ph-place" name="place" value="${esc(p.place)}" placeholder="e.g. Shibuya" autocomplete="off"/></div>
+          <div class="field"><label for="ph-date">Date</label><input class="input" id="ph-date" name="date" type="date" value="${esc(p.date)}"/></div>
+        </div></div>
+        <div class="modal-foot">
+          <button type="button" class="btn danger left" data-del>${icon('trash')} Delete</button>
+          <button type="button" class="btn" data-close>Cancel</button>
+          <button type="submit" class="btn primary">Save</button>
+        </div>
+      </form>`, { size: 'wide' });
+    hydratePhotos(el);
+    $('[data-del]', el).addEventListener('click', () => confirmDialog({
+      title: 'Delete this photo?', message: 'It will be removed from every device. This cannot be undone.',
+      onConfirm: async () => { closeModal(); await deletePhoto(p); commit('Photo deleted', RAINBOW[0]); },
+    }));
+    $('form', el).addEventListener('submit', e => {
+      e.preventDefault();
+      const f = e.target;
+      Object.assign(p, { caption: f.caption.value.trim(), place: f.place.value.trim(), date: f.date.value });
+      closeModal();
+      commit('Saved', RAINBOW[2]);
+    });
+  }
+
   /* ---------------- settings ---------------- */
   function pageSettings() {
     const s = S();
@@ -1004,7 +1140,7 @@
             <span class="dim mono" style="font-size:11px">${(usage / 1024).toFixed(1)} KB used · ${storageOk ? 'saved' : 'save failed'}</span>
           </div>
           <div class="danger-zone mt-24">
-            <div><div style="color:var(--text)">Start over</div><div class="dim" style="font-size:12.5px">Deletes your saved amount, documents, attachments, milestones and Japan list, and resets the budget to Sophia defaults.</div></div>
+            <div><div style="color:var(--text)">Start over</div><div class="dim" style="font-size:12.5px">Deletes your saved amount, documents, attachments, milestones, Japan list and photos, and resets the budget to Sophia defaults.</div></div>
             <button class="btn danger" data-action="reset">${icon('trash')} Reset all data</button>
           </div>
         </div>
@@ -1102,6 +1238,11 @@
     for (const d of state.documents.filter(x => x.fileId)) {
       try { const rec = await getFileRec(d); if (rec) attachments[d.fileId] = { name: rec.name, type: rec.type, data: await blobToDataURL(rec.blob) }; } catch (e) { console.error(e); }
     }
+    for (const p of state.photos) {
+      for (const which of ['full', 'thumb']) {
+        try { const rec = await getFileRec(photoRec(p, which)); if (rec) attachments[p[which]] = { name: rec.name, type: rec.type, data: await blobToDataURL(rec.blob) }; } catch (e) { console.error(e); }
+      }
+    }
     const blob = new Blob([JSON.stringify({ app: 'exchange-journal', exported: new Date().toISOString(), state, attachments }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -1128,6 +1269,8 @@
           }
           state = upgrade(incoming.version === 2 ? normalize(incoming) : fromV1(incoming));
           state.documents.forEach(d => { d.fileCloud = false; });
+          state.photos.forEach(p => { p.cloud = false; });
+          photoUrls.forEach(u => URL.revokeObjectURL(u)); photoUrls.clear();
           commit('Backup imported');
         },
       });
@@ -1162,6 +1305,13 @@
     'remove-file': el => { const d = find(state.documents, el.dataset.id); confirmDialog({ title: 'Remove attachment?', message: `“${esc(d.fileName)}” will be deleted. The document stays.`, confirm: 'Remove', onConfirm: async () => { try { await files.del(d.fileId); } catch (e) { console.error(e); } deleteCloudFile(d.fileId); Object.assign(d, { fileId: null, fileName: '', fileType: '', fileCloud: false }); commit('Attachment removed', RAINBOW[0]); } }); },
     'starter-docs': () => { state.documents.push(...starterDocs()); commit('Document list added', RAINBOW[3]); },
 
+    'photo-add': () => {
+      const inp = document.createElement('input');
+      inp.type = 'file'; inp.accept = 'image/*'; inp.multiple = true;
+      inp.onchange = () => inp.files.length && addPhotos(inp.files);
+      inp.click();
+    },
+    'photo-open': el => photoModal(find(state.photos, el.dataset.id)),
     'wish-filter': el => { state.ui.wishCat = el.dataset.val; save(); render(); },
     'wish-toggle': el => { const w = find(state.wishes, el.dataset.id); w.done = !w.done; w.doneAt = w.done ? today() : ''; commit(w.done ? 'Done — nice' : 'Marked not done', w.done ? RAINBOW[3] : RAINBOW[2]); },
     'wish-edit': el => wishForm(find(state.wishes, el.dataset.id)),
@@ -1186,7 +1336,7 @@
     'import': () => pickFile('application/json,.json', importData),
     'reset': () => confirmDialog({
       title: 'Reset all data?', confirm: 'Yes, delete everything',
-      message: 'This deletes your saved amount, documents, attachments, milestones, Japan list and budget edits — on every device, if you\'re signed in to sync. Consider exporting a backup first. <b style="color:var(--text)">This cannot be undone.</b>',
+      message: 'This deletes your saved amount, documents, attachments, milestones, Japan list, photos and budget edits — on every device, if you\'re signed in to sync. Consider exporting a backup first. <b style="color:var(--text)">This cannot be undone.</b>',
       onConfirm: async () => {
         try { await files.clear(); } catch (e) { console.error(e); }
         if (sb && sync.user) {
@@ -1207,7 +1357,7 @@
   /* ==========================================================
      ROUTER / RENDER
      ========================================================== */
-  const PAGES = { budget: pageBudget, earnings: pageEarnings, documents: pageDocuments, timeline: pageTimeline, list: pageList, settings: pageSettings };
+  const PAGES = { budget: pageBudget, earnings: pageEarnings, documents: pageDocuments, timeline: pageTimeline, list: pageList, photos: pagePhotos, settings: pageSettings };
   const route = () => { const h = location.hash.replace('#', ''); return PAGES[h] ? h : 'budget'; };
   function go(r) { if (location.hash !== '#' + r) location.hash = r; else render(); }
 
@@ -1234,6 +1384,7 @@
     document.title = `${meta.label} — exchange`;
     renderNav();
     $('#main').innerHTML = PAGES[r]();
+    if (r === 'photos') hydratePhotos($('#main'));
   }
 
   /* ---------------- global events ---------------- */
@@ -1334,6 +1485,13 @@
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && modalStack.length) { e.preventDefault(); closeModal(); }
+  });
+
+  document.addEventListener('dragover', e => { if (e.target.closest?.('[data-drop-photos]')) e.preventDefault(); });
+  document.addEventListener('drop', e => {
+    if (!e.target.closest?.('[data-drop-photos]')) return;
+    e.preventDefault();
+    if (e.dataTransfer.files.length) addPhotos(e.dataTransfer.files);
   });
 
   window.addEventListener('hashchange', () => { render(); window.scrollTo({ top: 0 }); $('#main').focus({ preventScroll: true }); });
