@@ -1100,30 +1100,58 @@
   }
 
   /* ---------------- map ----------------
-     Leaflet + OpenStreetMap tiles (darkened with CSS), loaded only when you open the page.
+     MapLibre globe with OpenFreeMap tiles and AWS terrain, loaded only when you open the page.
+     Everything outside Japan is faded out.
      Place search uses OpenStreetMap's Nominatim, only when you press Search. */
   const PLACE_KINDS = ['Sights', 'Food', 'Nature', 'City', 'Stay', 'Shopping', 'Other'];
   const placeColor = p => catColor(PLACE_KINDS, p.kind);
-  let leafletLoading = null, map = null, mapView = null, pickMode = false, focusId = null;
-  const markers = {};
+  let mapLibLoading = null, map = null, mapView = null, pickMode = false, focusId = null, japanShape = null;
+  const MAPLIBRE = 'https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl';
+  const JAPAN_BOUNDS = [[118, 18], [160, 52]];
 
-  function loadLeaflet() {
-    if (window.L) return Promise.resolve();
-    if (!leafletLoading) leafletLoading = new Promise((resolve, reject) => {
-      const css = document.createElement('link');
-      css.rel = 'stylesheet'; css.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
-      document.head.appendChild(css);
-      const js = document.createElement('script');
-      js.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-      js.onload = resolve;
-      js.onerror = () => { leafletLoading = null; reject(new Error('map failed to load')); };
-      document.head.appendChild(js);
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('could not load ' + src));
+      document.head.appendChild(s);
     });
-    return leafletLoading;
+  }
+  function loadMapLib() {
+    if (window.maplibregl) return Promise.resolve();
+    if (!mapLibLoading) {
+      const css = document.createElement('link');
+      css.rel = 'stylesheet'; css.href = MAPLIBRE + '.css';
+      document.head.appendChild(css);
+      mapLibLoading = loadScript(MAPLIBRE + '.js').catch(e => { mapLibLoading = null; throw e; });
+    }
+    return mapLibLoading;
+  }
+
+  // Japan's outline (Natural Earth), used to fade every other country and trace the coast in rainbow
+  const ringArea = r => { let a = 0; for (let i = 0, j = r.length - 1; i < r.length; j = i++) a += (r[j][0] - r[i][0]) * (r[j][1] + r[i][1]); return a; };
+  async function loadJapanShape() {
+    if (japanShape) return japanShape;
+    if (!window.topojson) await loadScript('https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js');
+    const topo = await fetch('https://cdn.jsdelivr.net/npm/world-atlas@2/countries-50m.json').then(r => r.json());
+    const jp = topojson.feature(topo, topo.objects.countries).features.find(f => String(f.id) === '392');
+    if (!jp) throw new Error('Japan outline not found');
+    const polys = jp.geometry.type === 'Polygon' ? [jp.geometry.coordinates] : jp.geometry.coordinates;
+    const outer = [[100, 0], [180, 0], [180, 66], [100, 66], [100, 0]];
+    const sign = Math.sign(ringArea(outer));
+    const holes = polys.map(p => Math.sign(ringArea(p[0])) === sign ? p[0].slice().reverse() : p[0]);
+    japanShape = {
+      mask: { type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [outer, ...holes] } },
+      coast: { type: 'FeatureCollection', features: polys.map(p => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: p[0] } })) },
+    };
+    return japanShape;
   }
 
   const shownPlaces = () => state.places.filter(p => !state.ui.placeFilter || p.status === state.ui.placeFilter);
   const placePhotos = p => (p.photoIds || []).map(id => find(state.photos, id)).filter(Boolean);
+  const placesGeo = () => ({
+    type: 'FeatureCollection',
+    features: shownPlaces().map(p => ({ type: 'Feature', properties: { id: p.id, color: placeColor(p), want: p.status === 'want' ? 1 : 0 }, geometry: { type: 'Point', coordinates: [p.lng, p.lat] } })),
+  });
 
   function placePopup(p) {
     const ph = placePhotos(p);
@@ -1136,42 +1164,81 @@
     </div>`;
   }
 
+  let popup = null;
+  function openPlace(p, fly) {
+    if (!map || !p) return;
+    if (popup) popup.remove();
+    const show = () => {
+      popup = new maplibregl.Popup({ maxWidth: '290px', offset: 14, className: 'place-pop' }).setLngLat([p.lng, p.lat]).setHTML(placePopup(p)).addTo(map);
+      hydratePhotos(popup.getElement());
+    };
+    if (fly) { map.flyTo({ center: [p.lng, p.lat], zoom: 10.5, pitch: 50, bearing: -15, duration: 2400, essential: true }); map.once('moveend', show); }
+    else show();
+  }
+
   async function mountMap() {
     const el = $('#map');
     if (!el) return;
-    try { await loadLeaflet(); }
+    try { await loadMapLib(); }
     catch { el.innerHTML = '<div class="map-off">The map needs an internet connection to load.</div>'; return; }
     if (!document.contains(el)) return;
-    if (map) { try { mapView = { c: map.getCenter(), z: map.getZoom() }; map.remove(); } catch { /* old map already gone */ } }
-    Object.keys(markers).forEach(k => delete markers[k]);
-    map = L.map(el, { zoomControl: true, worldCopyJump: true });
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19, className: 'dark-tiles',
-    }).addTo(map);
-    const pts = [];
-    shownPlaces().forEach(p => {
-      const c = placeColor(p);
-      const m = L.circleMarker([p.lat, p.lng], { radius: 8, color: c, weight: 2, fillColor: c, fillOpacity: p.status === 'want' ? 0.12 : 0.85 }).addTo(map);
-      m.bindPopup(() => placePopup(p), { maxWidth: 280, minWidth: 200 });
-      m.on('popupopen', e => hydratePhotos(e.popup.getElement()));
-      markers[p.id] = m;
-      pts.push([p.lat, p.lng]);
+    if (map) { try { mapView = { c: map.getCenter().toArray(), z: map.getZoom(), p: map.getPitch(), b: map.getBearing() }; map.remove(); } catch { /* already gone */ } map = null; }
+
+    const m = new maplibregl.Map({
+      container: el,
+      style: 'https://tiles.openfreemap.org/styles/dark',
+      center: mapView ? mapView.c : [137.8, 37.0], zoom: mapView ? mapView.z : 3.7,
+      pitch: mapView ? mapView.p : 0, bearing: mapView ? mapView.b : 0,
+      minZoom: 3.2, maxZoom: 17, maxPitch: 75, maxBounds: JAPAN_BOUNDS,
+      attributionControl: { compact: true },
     });
-    if (mapView) map.setView(mapView.c, mapView.z);
-    else if (pts.length > 1) map.fitBounds(pts, { padding: [40, 40], maxZoom: 12 });
-    else if (pts.length) map.setView(pts[0], 11);
-    else map.setView([36.2, 138.25], 5);
-    map.on('click', e => {
+    map = m;
+    m.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+    m.on('style.load', () => { try { m.setProjection({ type: 'globe' }); } catch (e) { console.warn(e); } });
+
+    m.on('load', async () => {
+      el.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
+      const firstLabel = (m.getStyle().layers.find(l => l.type === 'symbol') || {}).id;
+      // real terrain: mountains rise when you tilt the map
+      const dem = { type: 'raster-dem', tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'], encoding: 'terrarium', tileSize: 256, maxzoom: 12, attribution: 'Terrain: <a href="https://registry.opendata.aws/terrain-tiles/">Mapzen / AWS Open Data</a>' };
+      m.addSource('dem', dem);
+      m.addSource('dem-shade', { ...dem });
+      m.addLayer({ id: 'relief', type: 'hillshade', source: 'dem-shade', paint: { 'hillshade-shadow-color': '#000000', 'hillshade-highlight-color': '#4a4a52', 'hillshade-accent-color': '#111114', 'hillshade-exaggeration': 0.55 } }, firstLabel);
+      try { m.setTerrain({ source: 'dem', exaggeration: 1.3 }); } catch (e) { console.warn(e); }
+      try { m.setSky({ 'sky-color': '#0b0b10', 'horizon-color': '#1d1d27', 'fog-color': '#0b0b10', 'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.5, 'fog-ground-blend': 0.3, 'atmosphere-blend': ['interpolate', ['linear'], ['zoom'], 0, 1, 6, 0.6, 9, 0] }); } catch (e) { console.warn(e); }
+
+      m.addSource('places', { type: 'geojson', data: placesGeo() });
+      m.addLayer({ id: 'places-glow', type: 'circle', source: 'places', paint: { 'circle-radius': 15, 'circle-color': ['get', 'color'], 'circle-opacity': ['case', ['==', ['get', 'want'], 1], 0.12, 0.28], 'circle-blur': 1, 'circle-pitch-alignment': 'viewport' } });
+      m.addLayer({ id: 'places-dot', type: 'circle', source: 'places', paint: { 'circle-radius': 7, 'circle-color': ['get', 'color'], 'circle-opacity': ['case', ['==', ['get', 'want'], 1], 0, 0.95], 'circle-stroke-width': 2, 'circle-stroke-color': ['get', 'color'], 'circle-pitch-alignment': 'viewport' } });
+      m.on('mouseenter', 'places-dot', () => { m.getCanvas().style.cursor = 'pointer'; });
+      m.on('mouseleave', 'places-dot', () => { m.getCanvas().style.cursor = ''; });
+      m.on('click', 'places-dot', e => { if (pickMode) return; openPlace(find(state.places, e.features[0].properties.id)); });
+
+      try {
+        const jp = await loadJapanShape();
+        if (map !== m) return;
+        m.addSource('not-japan', { type: 'geojson', data: jp.mask });
+        m.addLayer({ id: 'not-japan', type: 'fill', source: 'not-japan', paint: { 'fill-color': '#08080a', 'fill-opacity': 0.88 } }, 'places-glow');
+        m.addSource('coast', { type: 'geojson', data: jp.coast, lineMetrics: true });
+        m.addLayer({ id: 'coast', type: 'line', source: 'coast', paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.2, 8, 2], 'line-opacity': 0.75, 'line-gradient': ['interpolate', ['linear'], ['line-progress'], ...RAINBOW.flatMap((c, i) => [i / 6, c])] } }, 'places-glow');
+      } catch (e) { console.warn('Japan outline unavailable', e); }
+
+      if (focusId) { const p = find(state.places, focusId); focusId = null; openPlace(p, true); }
+      else if (!mapView && shownPlaces().length) {
+        const b = new maplibregl.LngLatBounds();
+        shownPlaces().forEach(p => b.extend([p.lng, p.lat]));
+        m.fitBounds(b, { padding: 70, maxZoom: 8, duration: 0 });
+      }
+    });
+
+    m.on('click', e => {
       if (!pickMode) return;
       pickMode = false; el.classList.remove('picking');
       const moving = pendingMove ? find(state.places, pendingMove) : null;
       pendingMove = null;
-      placeForm(moving, { lat: e.latlng.lat, lng: e.latlng.lng });
+      placeForm(moving, { lat: e.lngLat.lat, lng: e.lngLat.lng });
     });
     if (pickMode) el.classList.add('picking');
-    if (focusId && markers[focusId]) { const m = markers[focusId]; map.setView(m.getLatLng(), Math.max(map.getZoom(), 13)); m.openPopup(); }
-    focusId = null;
   }
 
   function pageMap() {
@@ -1188,9 +1255,12 @@
           <button class="chip ${f === 'want' ? 'on' : ''}" style="--c:${RAINBOW[5]}" data-action="place-filter" data-val="want"><span class="sw"></span>Want to go <span class="ct">${want}</span></button>
         </div>
         <div class="grow"></div>
-        <span class="dim" style="font-size:11.5px">Filled pins = been there · hollow = want to go</span>
+        <span class="dim hide-sm" style="font-size:11.5px">Filled = been there · hollow = want to go</span>
+        <button class="btn sm" data-action="map-tilt">3D tilt</button>
+        <button class="btn sm ghost" data-action="map-home">All of Japan</button>
       </div>
       <div id="map" class="map"></div>
+      <p class="dim" style="font-size:11.5px;margin:8px 0 0">Drag to spin · scroll or pinch to zoom · right-drag or two-finger drag to tilt and see the mountains.</p>
       <section class="section">
         ${list.length ? `<div class="rows">${list.map(p => `<div class="row" style="align-items:center">
             <span class="map-dot ${p.status === 'want' ? 'want' : ''}" style="--c:${placeColor(p)}"></span>
@@ -1514,7 +1584,13 @@
     'place-add': () => placeForm(null),
     'place-edit': el => { const p = find(state.places, el.dataset.id); if (p) placeForm(p); },
     'place-del': el => { const p = find(state.places, el.dataset.id); confirmDialog({ title: 'Delete this place?', message: `“${esc(p.name)}” will be removed from your map. Its photos stay.`, onConfirm: () => { removeById('places', p.id); commit('Place removed', RAINBOW[0]); } }); },
-    'place-focus': el => { focusId = el.dataset.id; mountMap(); $('#map')?.scrollIntoView({ behavior: 'smooth', block: 'center' }); },
+    'place-focus': el => {
+      $('#map')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      if (map && map.loaded()) openPlace(find(state.places, el.dataset.id), true);
+      else { focusId = el.dataset.id; mountMap(); }
+    },
+    'map-tilt': () => { if (map) map.easeTo({ pitch: map.getPitch() > 15 ? 0 : 60, bearing: map.getPitch() > 15 ? 0 : -20, duration: 1200 }); },
+    'map-home': () => { if (map) map.flyTo({ center: [137.8, 37.0], zoom: 3.7, pitch: 0, bearing: 0, duration: 1800 }); },
     'place-filter': el => { state.ui.placeFilter = el.dataset.val; mapView = null; save(); render(); },
     'photo-open': el => photoModal(find(state.photos, el.dataset.id)),
     'wish-filter': el => { state.ui.wishCat = el.dataset.val; save(); render(); },
