@@ -1107,6 +1107,7 @@
   const placeColor = p => catColor(PLACE_KINDS, p.kind);
   let mapLibLoading = null, map = null, mapView = null, pickMode = false, focusId = null, japanShape = null;
   const MAPLIBRE = 'https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl';
+  const HOME_CENTER = [137.8, 37.0], HOME_ZOOM = 3.7;
   const JAPAN_BOUNDS = [[124, 25], [148, 45.5]]; // the map's center can't leave this box
 
   function loadScript(src) {
@@ -1141,6 +1142,7 @@
     const sign = Math.sign(ringArea(east));
     const holes = polys.map(p => Math.sign(ringArea(p[0])) === sign ? p[0].slice().reverse() : p[0]);
     japanShape = {
+      land: { type: 'Feature', properties: {}, geometry: jp.geometry },
       mask: { type: 'Feature', properties: {}, geometry: { type: 'MultiPolygon', coordinates: [[east, ...holes], [west]] } },
       coast: { type: 'FeatureCollection', features: polys.map(p => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: p[0] } })) },
     };
@@ -1188,9 +1190,9 @@
     const m = new maplibregl.Map({
       container: el,
       style: 'https://tiles.openfreemap.org/styles/dark',
-      center: mapView ? mapView.c : [137.8, 37.0], zoom: mapView ? mapView.z : 3.7,
+      center: mapView ? mapView.c : HOME_CENTER, zoom: mapView ? mapView.z : HOME_ZOOM,
       pitch: mapView ? mapView.p : 0, bearing: mapView ? mapView.b : 0,
-      minZoom: 1.4, maxZoom: 17, maxPitch: 75,
+      minZoom: HOME_ZOOM, maxZoom: 17, maxPitch: 75,
       transformCameraUpdate: cam => cam.center ? { center: new maplibregl.LngLat(clamp(cam.center.lng, JAPAN_BOUNDS[0][0], JAPAN_BOUNDS[1][0]), clamp(cam.center.lat, JAPAN_BOUNDS[0][1], JAPAN_BOUNDS[1][1])) } : {},
       attributionControl: { compact: true },
     });
@@ -1201,10 +1203,6 @@
     m.on('load', async () => {
       el.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
       const firstLabel = (m.getStyle().layers.find(l => l.type === 'symbol') || {}).id;
-      // labels fade in once you're zoomed in on Japan, so the dark globe stays clean
-      m.getStyle().layers.filter(l => l.type === 'symbol').forEach(l => {
-        try { m.setPaintProperty(l.id, 'text-opacity', ['interpolate', ['linear'], ['zoom'], 3.6, 0, 4.4, 1]); m.setPaintProperty(l.id, 'icon-opacity', ['interpolate', ['linear'], ['zoom'], 3.6, 0, 4.4, 1]); } catch { /* layer without text */ }
-      });
       // real terrain: mountains rise when you tilt the map
       const dem = { type: 'raster-dem', tiles: ['https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png'], encoding: 'terrarium', tileSize: 256, maxzoom: 12, attribution: 'Terrain: <a href="https://registry.opendata.aws/terrain-tiles/">Mapzen / AWS Open Data</a>' };
       m.addSource('dem', dem);
@@ -1227,6 +1225,11 @@
         m.addLayer({ id: 'not-japan', type: 'fill', source: 'not-japan', paint: { 'fill-color': '#060608', 'fill-opacity': 0.94, 'fill-antialias': false } }, 'places-glow');
         m.addSource('coast', { type: 'geojson', data: jp.coast, lineMetrics: true });
         m.addLayer({ id: 'coast', type: 'line', source: 'coast', paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 3, 1.2, 8, 2], 'line-opacity': 0.75, 'line-gradient': ['interpolate', ['linear'], ['line-progress'], ...RAINBOW.flatMap((c, i) => [i / 6, c])] } }, 'places-glow');
+        // hide every label outside Japan
+        m.getStyle().layers.filter(l => l.type === 'symbol').forEach(l => {
+          const f = m.getFilter(l.id);
+          try { m.setFilter(l.id, f ? ['all', f, ['within', jp.land]] : ['within', jp.land]); } catch (e) { console.warn(l.id, e); }
+        });
       } catch (e) { console.warn('Japan outline unavailable', e); }
 
       if (focusId) { const p = find(state.places, focusId); focusId = null; openPlace(p, true); }
@@ -1596,7 +1599,7 @@
       else { focusId = el.dataset.id; mountMap(); }
     },
     'map-tilt': () => { if (map) map.easeTo({ pitch: map.getPitch() > 15 ? 0 : 60, bearing: map.getPitch() > 15 ? 0 : -20, duration: 1200 }); },
-    'map-home': () => { if (map) map.flyTo({ center: [137.8, 37.0], zoom: 3.7, pitch: 0, bearing: 0, duration: 1800 }); },
+    'map-home': () => { if (map) map.flyTo({ center: HOME_CENTER, zoom: HOME_ZOOM, pitch: 0, bearing: 0, duration: 1800 }); },
     'place-filter': el => { state.ui.placeFilter = el.dataset.val; mapView = null; save(); render(); },
     'photo-open': el => photoModal(find(state.photos, el.dataset.id)),
     'wish-filter': el => { state.ui.wishCat = el.dataset.val; save(); render(); },
