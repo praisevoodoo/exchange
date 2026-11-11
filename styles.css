@@ -732,3 +732,36 @@ mark { background: rgba(230,200,120,.22); color: var(--text); border-radius: 2px
 .map-loading { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); pointer-events: none; animation: pulse 1.6s ease-in-out infinite; }
 .map.ready .map-loading { display: none; }
 @keyframes pulse { 50% { opacity: .35; } }
+
+/* ---------- phrasebook ---------- */
+.search-wrap { position: relative; flex: 1; max-width: 420px; }
+.search-wrap svg { position: absolute; left: 12px; top: 50%; width: 15px; height: 15px; transform: translateY(-50%); color: var(--dim); }
+.search-wrap .input { padding-left: 36px; }
+.phrase-group .photo-month { margin: 26px 0 12px; }
+.phrases { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.phrase { display: flex; align-items: stretch; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); transition: border-color .2s; }
+.phrase:hover { border-color: #3a3a3f; }
+.phrase-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; text-align: left; background: none; border: 0; color: inherit; padding: 14px 4px 14px 16px; cursor: pointer; font: inherit; }
+.phrase .ja { font-family: 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', 'Noto Sans JP', sans-serif; font-size: 19px; color: var(--text); line-height: 1.35; }
+.phrase .ro { font-family: var(--mono); font-size: 11px; color: var(--r3); letter-spacing: .02em; }
+.phrase .en { font-size: 12.5px; color: var(--dim); }
+.phrase-btns { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 6px; }
+.icon-btn.on { color: var(--r3); }
+.phrase-big { padding: 40px 28px 30px; text-align: center; }
+.phrase-big .ja { font-family: 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', 'Noto Sans JP', sans-serif; font-size: clamp(30px, 8vw, 52px); line-height: 1.3; color: var(--text); }
+.phrase-big .ro { font-family: var(--mono); font-size: 14px; color: var(--r3); margin-top: 16px; }
+.phrase-big .en { font-size: 15px; color: var(--dim); margin-top: 8px; }
+
+/* ---------- yen converter ---------- */
+.fab { position: fixed; right: 22px; bottom: 22px; z-index: 55; width: 52px; height: 52px; border-radius: 50%; border: 1px solid #3a3a3f; background: #161618; color: var(--text); font: 500 22px var(--sans); cursor: pointer; box-shadow: 0 10px 26px -8px rgba(0,0,0,.9); transition: transform .2s var(--ease), border-color .2s; }
+.fab::before { content: ''; position: absolute; inset: -2px; border-radius: 50%; padding: 1.5px; background: var(--rainbow); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; opacity: .7; }
+.fab:hover { transform: translateY(-2px) scale(1.04); }
+#toast-root { bottom: 88px; }
+.conv { display: flex; align-items: flex-end; gap: 12px; }
+.conv .field { flex: 1; }
+.conv-in { font-family: var(--mono); font-size: 20px; height: 48px; }
+.conv-eq { font-family: var(--serif); font-size: 26px; color: var(--dim); padding-bottom: 8px; }
+.conv-result { margin-top: 10px; font-size: 13.5px; color: var(--text-2); min-height: 20px; }
+.conv-result b { color: var(--text); font-weight: 500; font-family: var(--mono); }
+@media (max-width: 560px) { .fab { right: 16px; bottom: 16px; } #toast-root { bottom: 80px; } .conv { flex-direction: column; align-items: stretch; } .conv-eq { display: none; } }
+body:has(.modal-backdrop) .fab { display: none; }

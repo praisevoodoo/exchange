@@ -26,6 +26,7 @@
     { id: 'list', label: 'Japan list', color: RAINBOW[5] },
     { id: 'photos', label: 'Photos', color: RAINBOW[2] },
     { id: 'map', label: 'Map', color: RAINBOW[4] },
+    { id: 'phrases', label: 'Phrases', color: RAINBOW[0] },
     { id: 'settings', label: 'Settings', color: NEUTRAL },
   ];
 
@@ -73,6 +74,10 @@
     download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
     upload: '<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>',
     undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 010 12h-3"/>',
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4-4"/>',
+    sound: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 010 6M18 6.5a7.5 7.5 0 010 11"/>',
+    star: '<path d="M12 4l2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6z"/>',
+    starOn: '<path fill="currentColor" d="M12 4l2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6z"/>',
   };
   const icon = n => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${ICONS[n] || ''}</svg>`;
 
@@ -168,7 +173,8 @@
       wishes: [],
       photos: [],
       places: [],
-      ui: { editItems: false, docStatus: '', wishCat: '', wishCatAdd: 'Places', placeFilter: '' },
+      phrases: [], phraseFav: [],
+      ui: { editItems: false, docStatus: '', wishCat: '', wishCatAdd: 'Places', placeFilter: '', phraseCat: '', phraseQ: '', convYen: 1000, convTax: false },
     };
   }
 
@@ -209,6 +215,8 @@
       wishes: Array.isArray(s.wishes) ? s.wishes : [],
       photos: Array.isArray(s.photos) ? s.photos : [],
       places: Array.isArray(s.places) ? s.places : [],
+      phrases: Array.isArray(s.phrases) ? s.phrases : [],
+      phraseFav: Array.isArray(s.phraseFav) ? s.phraseFav : [],
       ui: { ...base.ui, ...(s.ui || {}) },
       seeded: Array.isArray(s.seeded) ? s.seeded : [],
     };
@@ -1387,6 +1395,184 @@
   }
   let pendingMove = null;
 
+  /* ---------------- phrasebook ----------------
+     Built-in phrases plus your own. The speaker button uses the device's Japanese voice. */
+  const PHRASE_CATS = ['Basics', 'Getting around', 'Food', 'Shopping', 'School & people', 'Emergencies'];
+  const PHRASES = [
+    ['Basics', 'Hello', 'こんにちは', 'konnichiwa'],
+    ['Basics', 'Thank you very much', 'ありがとうございます', 'arigatō gozaimasu'],
+    ['Basics', 'Excuse me / Sorry', 'すみません', 'sumimasen'],
+    ['Basics', 'Yes / No', 'はい / いいえ', 'hai / iie'],
+    ['Basics', 'I don\'t understand', 'わかりません', 'wakarimasen'],
+    ['Basics', 'Do you speak English?', '英語を話せますか？', 'eigo o hanasemasu ka?'],
+    ['Basics', 'Please speak slowly', 'ゆっくり話してください', 'yukkuri hanashite kudasai'],
+    ['Basics', 'One more time, please', 'もう一度お願いします', 'mō ichido onegai shimasu'],
+    ['Getting around', 'Where is the station?', '駅はどこですか？', 'eki wa doko desu ka?'],
+    ['Getting around', 'Does this train go to Shinjuku?', 'この電車は新宿に行きますか？', 'kono densha wa Shinjuku ni ikimasu ka?'],
+    ['Getting around', 'Which platform is it?', '何番線ですか？', 'nan-bansen desu ka?'],
+    ['Getting around', 'Where is the restroom?', 'トイレはどこですか？', 'toire wa doko desu ka?'],
+    ['Getting around', 'To this address, please (taxi)', 'この住所までお願いします', 'kono jūsho made onegai shimasu'],
+    ['Getting around', 'I\'m lost', '道に迷いました', 'michi ni mayoimashita'],
+    ['Food', 'Just one person', '一人です', 'hitori desu'],
+    ['Food', 'The menu, please', 'メニューをお願いします', 'menyū o onegai shimasu'],
+    ['Food', 'This one, please', 'これをお願いします', 'kore o onegai shimasu'],
+    ['Food', 'I have a food allergy', '食物アレルギーがあります', 'shokumotsu arerugī ga arimasu'],
+    ['Food', 'Water, please', 'お水をお願いします', 'omizu o onegai shimasu'],
+    ['Food', 'The check, please', 'お会計をお願いします', 'okaikei o onegai shimasu'],
+    ['Food', 'Thank you for the meal (when leaving)', 'ごちそうさまでした', 'gochisōsama deshita'],
+    ['Shopping', 'How much is this?', 'これはいくらですか？', 'kore wa ikura desu ka?'],
+    ['Shopping', 'Can I pay by card?', 'カードで払えますか？', 'kādo de haraemasu ka?'],
+    ['Shopping', 'I don\'t need a bag', '袋はいりません', 'fukuro wa irimasen'],
+    ['Shopping', 'Could you heat it up? (convenience store)', '温めてください', 'atatamete kudasai'],
+    ['Shopping', 'I\'m just looking', '見ているだけです', 'mite iru dake desu'],
+    ['School & people', 'Nice to meet you', 'はじめまして', 'hajimemashite'],
+    ['School & people', 'I\'m an exchange student at Sophia', '上智大学の留学生です', 'Jōchi Daigaku no ryūgakusei desu'],
+    ['School & people', 'I\'m from America', 'アメリカから来ました', 'Amerika kara kimashita'],
+    ['School & people', 'Nice to work with you (said when meeting)', 'よろしくお願いします', 'yoroshiku onegai shimasu'],
+    ['School & people', 'Where is this classroom?', 'この教室はどこですか？', 'kono kyōshitsu wa doko desu ka?'],
+    ['School & people', 'May I sit here?', 'ここに座ってもいいですか？', 'koko ni suwatte mo ii desu ka?'],
+    ['Emergencies', 'Help!', '助けて！', 'tasukete!'],
+    ['Emergencies', 'Please call an ambulance', '救急車を呼んでください', 'kyūkyūsha o yonde kudasai'],
+    ['Emergencies', 'Please call the police', '警察を呼んでください', 'keisatsu o yonde kudasai'],
+    ['Emergencies', 'I feel sick', '気分が悪いです', 'kibun ga warui desu'],
+    ['Emergencies', 'Where is the hospital?', '病院はどこですか？', 'byōin wa doko desu ka?'],
+    ['Emergencies', 'I lost my wallet', '財布をなくしました', 'saifu o nakushimashita'],
+  ].map(([cat, en, ja, ro]) => ({ id: 'b:' + ja, cat, en, ja, ro, builtin: true }));
+
+  const allPhrases = () => [...PHRASES, ...state.phrases.map(p => ({ ...p, builtin: false }))];
+
+  let jaVoice = null;
+  function pickVoice() {
+    const v = window.speechSynthesis ? speechSynthesis.getVoices() : [];
+    jaVoice = v.find(x => /^ja(-|_|$)/i.test(x.lang)) || null;
+    return v.length;
+  }
+  if (window.speechSynthesis) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+  function speak(text) {
+    if (!window.speechSynthesis) { toast('This browser can\'t play speech', RAINBOW[0]); return; }
+    const count = pickVoice();
+    if (count && !jaVoice) toast('No Japanese voice on this device — on PC, add one in Windows Settings → Time & language → Speech', RAINBOW[2]);
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text.replace(/\s*\/\s*/g, '、'));
+    u.lang = 'ja-JP'; u.rate = 0.85;
+    if (jaVoice) u.voice = jaVoice;
+    speechSynthesis.speak(u);
+  }
+
+  function phraseCard(p) {
+    const fav = state.phraseFav.includes(p.id);
+    return `<div class="phrase">
+      <button class="phrase-main" data-action="phrase-show" data-id="${esc(p.id)}" aria-label="Show larger">
+        <span class="ja" lang="ja">${esc(p.ja)}</span>
+        ${p.ro ? `<span class="ro">${esc(p.ro)}</span>` : ''}
+        <span class="en">${esc(p.en)}</span>
+      </button>
+      <div class="phrase-btns">
+        <button class="icon-btn" data-action="phrase-speak" data-id="${esc(p.id)}" aria-label="Play pronunciation" title="Play">${icon('sound')}</button>
+        <button class="icon-btn ${fav ? 'on' : ''}" data-action="phrase-fav" data-id="${esc(p.id)}" aria-label="${fav ? 'Remove from saved' : 'Save'}" title="${fav ? 'Saved' : 'Save'}">${icon(fav ? 'starOn' : 'star')}</button>
+        ${p.builtin ? '' : `<button class="icon-btn" data-action="phrase-edit" data-id="${esc(p.id)}" aria-label="Edit">${icon('edit')}</button>`}
+      </div>
+    </div>`;
+  }
+
+  function phraseListHtml() {
+    const c = state.ui.phraseCat, q = (state.ui.phraseQ || '').trim().toLowerCase();
+    let list = allPhrases();
+    if (c === 'saved') list = list.filter(p => state.phraseFav.includes(p.id));
+    else if (c === 'mine') list = list.filter(p => !p.builtin);
+    else if (c) list = list.filter(p => p.cat === c);
+    if (q) list = list.filter(p => [p.en, p.ja, p.ro].some(t => (t || '').toLowerCase().includes(q)));
+    if (!list.length) return emptyState(q ? 'No matches' : c === 'saved' ? 'Nothing saved yet' : c === 'mine' ? 'No phrases of your own yet' : 'Nothing here',
+      q ? 'Try another word, in English or Japanese.' : c === 'saved' ? 'Tap the star on any phrase to keep it here.' : 'Add phrases you pick up along the way.',
+      c === 'mine' ? `<button class="btn primary sm" data-action="phrase-add">${icon('plus')} Add a phrase</button>` : '', true);
+    if (c || q) return `<div class="phrases">${list.map(phraseCard).join('')}</div>`;
+    const cats = [...PHRASE_CATS, ...new Set(state.phrases.map(p => p.cat).filter(x => !PHRASE_CATS.includes(x)))];
+    return cats.map(cat => {
+      const items = list.filter(p => p.cat === cat);
+      return items.length ? `<div class="phrase-group"><div class="photo-month">${esc(cat)}</div><div class="phrases">${items.map(phraseCard).join('')}</div></div>` : '';
+    }).join('');
+  }
+
+  function pagePhrases() {
+    const c = state.ui.phraseCat;
+    const chip = (val, label, color) => `<button class="chip ${c === val ? 'on' : ''}" ${color ? `style="--c:${color}"` : ''} data-action="phrase-cat" data-val="${esc(val)}">${color ? '<span class="sw"></span>' : ''}${label}</button>`;
+    return `<div class="page">
+      ${pageHead('phrases', 'Say it in <em>Japanese</em>', 'Tap the speaker to hear it, or tap a phrase to show it big on your screen.',
+        `<button class="btn primary" data-action="phrase-add">${icon('plus')} Add phrase</button>`)}
+      <div class="toolbar">
+        <div class="search-wrap">${icon('search')}<input class="input" data-phrase-q placeholder="Search phrases…" value="${esc(state.ui.phraseQ || '')}" aria-label="Search phrases"/></div>
+      </div>
+      <div class="chips" style="margin-bottom:8px">
+        ${chip('', 'All')}${chip('saved', '★ Saved', RAINBOW[2])}${chip('mine', 'Mine', RAINBOW[5])}
+        ${PHRASE_CATS.map((x, i) => chip(x, x, rc(i))).join('')}
+      </div>
+      <div id="phrase-list">${phraseListHtml()}</div>
+      <p class="dim" style="font-size:11.5px;margin:22px 0 0">Emergency numbers in Japan: <b style="color:var(--text)">110</b> police · <b style="color:var(--text)">119</b> fire &amp; ambulance.</p>
+    </div>`;
+  }
+
+  function phraseShow(p) {
+    const el = showModal(`
+      <div class="phrase-big">
+        <div class="ja" lang="ja">${esc(p.ja)}</div>
+        ${p.ro ? `<div class="ro">${esc(p.ro)}</div>` : ''}
+        <div class="en">${esc(p.en)}</div>
+      </div>
+      <div class="modal-foot"><button class="btn" data-speak>${icon('sound')} Play</button><button class="btn primary" data-close>Done</button></div>`, { size: 'wide' });
+    $('[data-speak]', el).addEventListener('click', () => speak(p.ja));
+  }
+
+  function phraseForm(p) {
+    formModal({
+      eyebrow: 'phrases', title: p ? 'Edit phrase' : 'Add a phrase',
+      fields: [
+        { name: 'en', label: 'English', required: true, value: p?.en || '', placeholder: 'e.g. Is this seat taken?', full: true },
+        { name: 'ja', label: 'Japanese', required: true, value: p?.ja || '', placeholder: 'e.g. この席は空いていますか？', full: true },
+        { name: 'ro', label: 'How to say it (romaji)', value: p?.ro || '', placeholder: 'e.g. kono seki wa aite imasu ka?', full: true },
+        { name: 'cat', label: 'Category', type: 'select', options: ['My phrases', ...PHRASE_CATS], value: p?.cat || 'My phrases' },
+      ],
+      submit: p ? 'Save' : 'Add phrase',
+      onDelete: p ? () => confirmDialog({ title: 'Delete this phrase?', message: `“${esc(p.en)}” will be removed.`, onConfirm: () => { closeModal(); state.phrases = state.phrases.filter(x => x.id !== p.id); state.phraseFav = state.phraseFav.filter(x => x !== p.id); commit('Phrase deleted', RAINBOW[0]); } }) : null,
+      onSubmit: v => {
+        if (p) Object.assign(find(state.phrases, p.id), v);
+        else state.phrases.push({ id: 'm:' + uid(), created: Date.now(), ...v });
+        commit(p ? 'Phrase updated' : 'Phrase added', RAINBOW[5]);
+      },
+    });
+  }
+
+  /* ---------------- yen converter (floating ¥ button) ---------------- */
+  function converter() {
+    const r = rate();
+    const yen0 = Number(state.ui.convYen) || 1000;
+    const el = showModal(`
+      <div class="modal-head"><div><div class="eyebrow"><span class="dot"></span>converter</div><h2>Yen ⇄ dollars</h2></div>
+        <button type="button" class="icon-btn" data-close aria-label="Close">${icon('x')}</button></div>
+      <div class="modal-body">
+        <div class="conv">
+          <label class="field"><span class="lbl">Yen</span><div class="input-wrap"><span class="prefix">¥</span><input class="input conv-in" type="number" inputmode="decimal" min="0" step="any" data-conv="yen" value="${yen0}"/></div></label>
+          <span class="conv-eq">=</span>
+          <label class="field"><span class="lbl">Dollars</span><div class="input-wrap"><span class="prefix">$</span><input class="input conv-in" type="number" inputmode="decimal" min="0" step="any" data-conv="usd" value="${(yen0 / r).toFixed(2)}"/></div></label>
+        </div>
+        <label class="check" style="margin-top:14px"><input type="checkbox" data-conv-tax ${state.ui.convTax ? 'checked' : ''}/> Price is before tax (税抜) — add 10%</label>
+        <div class="conv-result" data-conv-out></div>
+        <div class="chips" style="margin-top:14px">${[100, 500, 1000, 3000, 5000, 10000].map(v => `<button class="chip" data-quick="${v}">¥${v.toLocaleString('en-US')}</button>`).join('')}</div>
+        <p class="dim" style="font-size:11.5px;margin:14px 0 0">Using ¥${r} = $1 · <a class="link" href="#settings" data-close>change rate in Settings</a></p>
+      </div>`, { size: 'narrow' });
+    const yen = $('[data-conv="yen"]', el), usd = $('[data-conv="usd"]', el), tax = $('[data-conv-tax]', el), out = $('[data-conv-out]', el);
+    const show = () => {
+      const y = Number(yen.value) || 0, withTax = tax.checked ? y * 1.1 : y;
+      out.innerHTML = tax.checked && y ? `With tax: <b>¥${Math.round(withTax).toLocaleString('en-US')}</b> = <b>$${(withTax / r).toFixed(2)}</b>` : '';
+      state.ui.convYen = y; state.ui.convTax = tax.checked; persist();
+    };
+    yen.addEventListener('input', () => { usd.value = ((Number(yen.value) || 0) / r).toFixed(2); show(); });
+    usd.addEventListener('input', () => { yen.value = Math.round((Number(usd.value) || 0) * r); show(); });
+    tax.addEventListener('change', show);
+    $$('[data-quick]', el).forEach(b => b.addEventListener('click', () => { yen.value = b.dataset.quick; yen.dispatchEvent(new Event('input')); }));
+    show();
+    setTimeout(() => { yen.focus(); yen.select(); }, 40);
+  }
+
   /* ---------------- settings ---------------- */
   function pageSettings() {
     const s = S();
@@ -1432,7 +1618,7 @@
             <span class="dim mono" style="font-size:11px">${(usage / 1024).toFixed(1)} KB used · ${storageOk ? 'saved' : 'save failed'}</span>
           </div>
           <div class="danger-zone mt-24">
-            <div><div style="color:var(--text)">Start over</div><div class="dim" style="font-size:12.5px">Deletes your saved amount, documents, attachments, milestones, Japan list, photos and map, and resets the budget to Sophia defaults.</div></div>
+            <div><div style="color:var(--text)">Start over</div><div class="dim" style="font-size:12.5px">Deletes your saved amount, documents, attachments, milestones, Japan list, photos, map and your own phrases, and resets the budget to Sophia defaults.</div></div>
             <button class="btn danger" data-action="reset">${icon('trash')} Reset all data</button>
           </div>
         </div>
@@ -1603,6 +1789,17 @@
       inp.onchange = () => inp.files.length && addPhotos(inp.files);
       inp.click();
     },
+    'phrase-cat': el => { state.ui.phraseCat = el.dataset.val; persist(); render(); },
+    'phrase-speak': el => { const p = allPhrases().find(x => x.id === el.dataset.id); if (p) speak(p.ja); },
+    'phrase-show': el => { const p = allPhrases().find(x => x.id === el.dataset.id); if (p) phraseShow(p); },
+    'phrase-fav': el => {
+      const id = el.dataset.id, i = state.phraseFav.indexOf(id);
+      if (i >= 0) state.phraseFav.splice(i, 1); else state.phraseFav.push(id);
+      save(); const box = $('#phrase-list'); if (box) box.innerHTML = phraseListHtml();
+    },
+    'phrase-add': () => phraseForm(null),
+    'phrase-edit': el => phraseForm(find(state.phrases, el.dataset.id)),
+    'convert': () => converter(),
     'place-add': () => placeForm(null),
     'place-edit': el => { const p = find(state.places, el.dataset.id); if (p) placeForm(p); },
     'place-del': el => { const p = find(state.places, el.dataset.id); confirmDialog({ title: 'Delete this place?', message: `“${esc(p.name)}” will be removed from your map. Its photos stay.`, onConfirm: () => { removeById('places', p.id); commit('Place removed', RAINBOW[0]); } }); },
@@ -1660,7 +1857,7 @@
   /* ==========================================================
      ROUTER / RENDER
      ========================================================== */
-  const PAGES = { budget: pageBudget, earnings: pageEarnings, documents: pageDocuments, timeline: pageTimeline, list: pageList, photos: pagePhotos, map: pageMap, settings: pageSettings };
+  const PAGES = { budget: pageBudget, earnings: pageEarnings, documents: pageDocuments, timeline: pageTimeline, list: pageList, photos: pagePhotos, map: pageMap, phrases: pagePhrases, settings: pageSettings };
   const route = () => { const h = location.hash.replace('#', ''); return PAGES[h] ? h : 'budget'; };
   function go(r) { if (location.hash !== '#' + r) location.hash = r; else render(); }
 
@@ -1738,6 +1935,11 @@
         $$('[data-action="duration"]').forEach(b => b.classList.toggle('on', b.dataset.val === state.plan.duration));
       } else state.plan.buffer = Math.min(100, v);
       save(); refreshBudget(); return;
+    }
+    if (t.hasAttribute('data-phrase-q')) {
+      state.ui.phraseQ = t.value; persist();
+      const box = $('#phrase-list'); if (box) box.innerHTML = phraseListHtml();
+      return;
     }
     if (t.dataset.earn) {
       let v = Math.max(0, Number(t.value) || 0);
